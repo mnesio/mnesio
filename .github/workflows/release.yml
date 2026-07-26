@@ -1,0 +1,118 @@
+name: release
+
+# Publishes on a version tag (v*): crates.io, PyPI, npm, and a container image
+# to GHCR. Where the registry supports it we use tokenless publishing (OIDC /
+# trusted publishing / provenance) so no long-lived secrets live in the repo.
+#
+# ONE-TIME SETUP is required per registry before these jobs succeed — see
+# PUBLISHING.md. In particular, crates.io and npm need the *first* publish of a
+# name done manually (to establish ownership), after which CI takes over.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ----- Container image → GitHub Container Registry (no external secrets) -----
+  docker:
+    name: container → ghcr.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/mnesio/mnesio
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # linux/amd64 only: the Rust workspace is heavy and cross-building
+          # arm64 under QEMU emulation on the shared runner times out. Add
+          # arm64 later via a native arm runner if there's demand.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ----- crates.io (OIDC trusted publishing) -----
+  # Requires a Trusted Publisher configured on each mnesio-* crate first, which
+  # in turn requires each crate to already exist — so the FIRST publish is
+  # manual (see PUBLISHING.md). This job handles every release after that.
+  crates-io:
+    name: crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Exchange OIDC for a short-lived crates.io token
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo install cargo-workspaces --locked
+      - name: Publish workspace in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        # Publishes the versions currently in the manifests, in topological
+        # order, skipping any already on crates.io.
+        run: cargo ws publish --from-git --allow-dirty --yes --no-git-commit
+
+  # ----- PyPI (OIDC trusted publishing; supports a "pending" publisher) -----
+  pypi:
+    name: PyPI (mnesio)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheel + sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --sdist
+          manylinux: auto
+          working-directory: crates/mnesio-py
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: crates/mnesio-py/dist
+
+  # ----- npm (provenance; needs an NPM_TOKEN automation-token secret) -----
+  npm:
+    name: npm (@mnesio/sdk)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # provenance attestation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - working-directory: sdk/node
+        run: npm ci || npm install
+      - working-directory: sdk/node
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
