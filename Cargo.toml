@@ -34,24 +34,24 @@ rust-version = "1.79"
 
 [workspace.dependencies]
 # --- internal crates ---
-mnesio-core = { path = "crates/mnesio-core" }
-mnesio-store = { path = "crates/mnesio-store" }
-mnesio-index = { path = "crates/mnesio-index" }
-mnesio-graph = { path = "crates/mnesio-graph" }
-mnesio-extract = { path = "crates/mnesio-extract" }
-mnesio-privacy = { path = "crates/mnesio-privacy" }
-mnesio-llm = { path = "crates/mnesio-llm", default-features = false }
-mnesio-evolve = { path = "crates/mnesio-evolve" }
-mnesio-procedural = { path = "crates/mnesio-procedural" }
-mnesio-causal = { path = "crates/mnesio-causal" }
-mnesio-probe = { path = "crates/mnesio-probe" }
-mnesio-kv = { path = "crates/mnesio-kv" }
-mnesio-exchange = { path = "crates/mnesio-exchange" }
-mnesio-dream = { path = "crates/mnesio-dream" }
-mnesio-provenance = { path = "crates/mnesio-provenance" }
-mnesio-bench = { path = "crates/mnesio-bench" }
-mnesio-mcp = { path = "crates/mnesio-mcp" }
-mnesio-py = { path = "crates/mnesio-py" }
+mnesio-core = { path = "crates/mnesio-core", version = "0.1.0" }
+mnesio-store = { path = "crates/mnesio-store", version = "0.1.0" }
+mnesio-index = { path = "crates/mnesio-index", version = "0.1.0" }
+mnesio-graph = { path = "crates/mnesio-graph", version = "0.1.0" }
+mnesio-extract = { path = "crates/mnesio-extract", version = "0.1.0" }
+mnesio-privacy = { path = "crates/mnesio-privacy", version = "0.1.0" }
+mnesio-llm = { path = "crates/mnesio-llm", version = "0.1.0", default-features = false }
+mnesio-evolve = { path = "crates/mnesio-evolve", version = "0.1.0" }
+mnesio-procedural = { path = "crates/mnesio-procedural", version = "0.1.0" }
+mnesio-causal = { path = "crates/mnesio-causal", version = "0.1.0" }
+mnesio-probe = { path = "crates/mnesio-probe", version = "0.1.0" }
+mnesio-kv = { path = "crates/mnesio-kv", version = "0.1.0" }
+mnesio-exchange = { path = "crates/mnesio-exchange", version = "0.1.0" }
+mnesio-dream = { path = "crates/mnesio-dream", version = "0.1.0" }
+mnesio-provenance = { path = "crates/mnesio-provenance", version = "0.1.0" }
+mnesio-bench = { path = "crates/mnesio-bench", version = "0.1.0" }
+mnesio-mcp = { path = "crates/mnesio-mcp", version = "0.1.0" }
+mnesio-py = { path = "crates/mnesio-py", version = "0.1.0" }
 
 # --- foundation (see architecture report, "Rust Crate Survey") ---
 tokio = { version = "1", features = ["full"] }
