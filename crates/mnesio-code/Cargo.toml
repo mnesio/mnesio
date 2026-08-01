@@ -1,0 +1,28 @@
+[package]
+name = "mnesio-code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Code memory for mnesio: parses a codebase into symbols + a call graph so agents retrieve only the code they need."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[features]
+# The dependency-free core (types, the `CodeParser` seam, the indexer) always
+# compiles. Real multi-language parsing pulls in tree-sitter + a grammar per
+# language, which is a heavy build, so it stays behind a feature — mirroring
+# the `ollama` / `candle-kv` pattern. Tests run against `FakeParser`, so the
+# default build and CI stay light and offline.
+default = []
+tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust"]
+
+[dependencies]
+mnesio-core.workspace = true
+serde = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-rust = { version = "0.23", optional = true }

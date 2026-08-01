@@ -19,6 +19,7 @@ members = [
     "crates/mnesio-server",
     "crates/mnesio-bench",
     "crates/mnesio-mcp",
+    "crates/mnesio-code",
     "crates/mnesio-py",
 ]
 
@@ -51,6 +52,7 @@ mnesio-dream = { path = "crates/mnesio-dream", version = "0.1.0" }
 mnesio-provenance = { path = "crates/mnesio-provenance", version = "0.1.0" }
 mnesio-bench = { path = "crates/mnesio-bench", version = "0.1.0" }
 mnesio-mcp = { path = "crates/mnesio-mcp", version = "0.1.0" }
+mnesio-code = { path = "crates/mnesio-code", version = "0.1.0" }
 mnesio-py = { path = "crates/mnesio-py", version = "0.1.0" }
 
 # --- foundation (see architecture report, "Rust Crate Survey") ---
