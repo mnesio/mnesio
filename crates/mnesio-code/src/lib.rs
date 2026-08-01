@@ -31,8 +31,10 @@
 //! - [`HeuristicParser`] — dependency-free line/brace scanning; what the tests
 //!   run on. Real grammars land behind the `tree-sitter` feature.
 
+pub mod index;
 pub mod parse;
 
+pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
 pub use parse::{CodeParser, HeuristicParser, ParseError};
 
 use serde::{Deserialize, Serialize};
