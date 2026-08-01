@@ -1549,12 +1549,22 @@ fn node_dto(
     }
 }
 
+/// Stable wire labels for the dashboard's graph edges.
+///
+/// Kept exhaustive on purpose: adding a `Relation` should fail the build here
+/// rather than silently render as an unlabelled edge.
 fn relation_label(r: Relation) -> &'static str {
     match r {
         Relation::Linked => "linked",
         Relation::EvolvedFrom => "evolved_from",
         Relation::EvolvedTo => "evolved_to",
         Relation::ContainedIn => "contained_in",
+        // Phase 17 code edges.
+        Relation::Calls => "calls",
+        Relation::Imports => "imports",
+        Relation::Implements => "implements",
+        Relation::References => "references",
+        Relation::TestOf => "test_of",
     }
 }
 

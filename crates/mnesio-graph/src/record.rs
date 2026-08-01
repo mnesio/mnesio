@@ -24,8 +24,26 @@ pub enum Relation {
     /// Reverse of `EvolvedFrom` — stored so lineage walks forward
     /// (older → newer) are also a single prefix scan.
     EvolvedTo = 3,
-    /// `src` is a chunk of source document `dst`.
+    /// `src` is a chunk of source document `dst`. For a code index this is
+    /// also the symbol→file edge: a symbol *is* a chunk of its file.
     ContainedIn = 4,
+
+    // --- Phase 17 (code memory) ---------------------------------------
+    // Discriminants continue from 4; existing values are untouched so
+    // graphs written before Phase 17 keep decoding.
+    /// `src` invokes `dst`. The backbone of code-context expansion:
+    /// understanding a function usually means reading its callees.
+    Calls = 5,
+    /// `src`'s file imports or `use`s `dst`.
+    Imports = 6,
+    /// `src` implements the trait/interface `dst`.
+    Implements = 7,
+    /// `src` mentions `dst` without calling it — a type in a signature, say.
+    References = 8,
+    /// `src` is a test exercising `dst`. Kept distinct from `Calls` because a
+    /// test is the strongest *usage example* of a symbol, which makes it
+    /// disproportionately useful context.
+    TestOf = 9,
 }
 
 impl Relation {
@@ -39,8 +57,42 @@ impl Relation {
             2 => Some(Relation::EvolvedFrom),
             3 => Some(Relation::EvolvedTo),
             4 => Some(Relation::ContainedIn),
+            5 => Some(Relation::Calls),
+            6 => Some(Relation::Imports),
+            7 => Some(Relation::Implements),
+            8 => Some(Relation::References),
+            9 => Some(Relation::TestOf),
             _ => None,
         }
+    }
+
+    /// Every variant, so tests and traversal filters can enumerate without
+    /// drifting out of sync when a relation is added.
+    pub const ALL: &'static [Relation] = &[
+        Relation::Linked,
+        Relation::EvolvedFrom,
+        Relation::EvolvedTo,
+        Relation::ContainedIn,
+        Relation::Calls,
+        Relation::Imports,
+        Relation::Implements,
+        Relation::References,
+        Relation::TestOf,
+    ];
+
+    /// Is this a code-structure edge (Phase 17) rather than a memory edge?
+    ///
+    /// Context expansion walks only these, so a code query doesn't wander off
+    /// into A-MEM evolution lineage.
+    pub fn is_code(self) -> bool {
+        matches!(
+            self,
+            Relation::Calls
+                | Relation::Imports
+                | Relation::Implements
+                | Relation::References
+                | Relation::TestOf
+        )
     }
 }
 
@@ -216,16 +268,44 @@ mod tests {
 
     #[test]
     fn relation_byte_roundtrip() {
-        for r in [
-            Relation::Linked,
-            Relation::EvolvedFrom,
-            Relation::EvolvedTo,
-            Relation::ContainedIn,
-        ] {
-            assert_eq!(Relation::from_byte(r.as_byte()), Some(r));
+        // Drives `ALL`, so a newly added relation can't silently miss
+        // `from_byte` and start decoding as `None` off disk.
+        for r in Relation::ALL {
+            assert_eq!(Relation::from_byte(r.as_byte()), Some(*r), "{r:?}");
         }
         assert_eq!(Relation::from_byte(0), None);
         assert_eq!(Relation::from_byte(99), None);
+    }
+
+    #[test]
+    fn pre_phase17_discriminants_are_frozen() {
+        // These bytes are baked into on-disk edge keys. Changing one would
+        // silently re-label every existing edge in a live graph, so they are
+        // pinned by value rather than by variant.
+        assert_eq!(Relation::Linked.as_byte(), 1);
+        assert_eq!(Relation::EvolvedFrom.as_byte(), 2);
+        assert_eq!(Relation::EvolvedTo.as_byte(), 3);
+        assert_eq!(Relation::ContainedIn.as_byte(), 4);
+    }
+
+    #[test]
+    fn code_relations_are_classified_and_distinct() {
+        let bytes: Vec<u8> = Relation::ALL.iter().map(|r| r.as_byte()).collect();
+        let mut uniq = bytes.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), bytes.len(), "discriminants must be unique");
+
+        // Code expansion walks only code edges; memory edges (evolution
+        // lineage, A-MEM links) must not be swept in.
+        assert!(Relation::Calls.is_code());
+        assert!(Relation::TestOf.is_code());
+        assert!(!Relation::Linked.is_code());
+        assert!(!Relation::EvolvedFrom.is_code());
+        assert!(
+            !Relation::ContainedIn.is_code(),
+            "ContainedIn predates Phase 17 and is shared with document chunking"
+        );
     }
 
     #[test]
