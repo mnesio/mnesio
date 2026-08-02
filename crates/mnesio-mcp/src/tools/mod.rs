@@ -10,6 +10,7 @@ use crate::context::AppContext;
 use crate::protocol::{CallToolResult, ToolDescriptor};
 use serde_json::Value;
 
+pub mod code_context;
 pub mod record_outcome;
 pub mod search;
 pub mod write_memory;
@@ -20,6 +21,7 @@ pub mod write_memory;
 pub fn all_tools() -> Vec<ToolDescriptor> {
     vec![
         write_memory::descriptor(),
+        code_context::descriptor(),
         search::descriptor(),
         record_outcome::descriptor(),
     ]
@@ -39,6 +41,7 @@ pub async fn dispatch(
         "mnesio_write_memory" => write_memory::handle(ctx, arguments).await,
         "mnesio_search" => search::handle(ctx, arguments).await,
         "mnesio_record_outcome" => record_outcome::handle(ctx, arguments).await,
+        "mnesio_code_context" => code_context::handle(ctx, arguments).await,
         other => anyhow::bail!("unknown tool {other:?}"),
     }
 }

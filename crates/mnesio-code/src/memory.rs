@@ -40,7 +40,9 @@ use mnesio_core::{Embedder, MnesioError, Query, Retriever};
 use mnesio_index::{Bm25View, HybridRetriever, LexicalReranker, VectorView};
 
 use crate::pack::{pack, PackConfig, PackSource, PackedContext};
-use crate::{CodeIndexer, CodeParser, HeuristicParser, IndexStats, ParsedFile, SymbolKind};
+#[cfg(not(feature = "tree-sitter"))]
+use crate::HeuristicParser;
+use crate::{CodeIndexer, CodeParser, IndexStats, ParsedFile, SymbolKind};
 
 /// Directories that are never a repository's own source.
 ///
@@ -62,10 +64,18 @@ const SKIP_DIRS: &[&str] = &[
     ".next",
 ];
 
-/// Extension → language tag, limited to what [`HeuristicParser`] handles.
+/// Extension → language tag.
 ///
 /// Anything unlisted is skipped rather than parsed into plausible nonsense: a
 /// wrong symbol boundary produces a memory that retrieves well and is useless.
+/// The set widens with the `tree-sitter` feature — 30 languages there against
+/// the 6 the dependency-free parser can follow.
+#[cfg(feature = "tree-sitter")]
+fn language_of(path: &Path) -> Option<&'static str> {
+    crate::parse_ts::language_for_extension(path.extension()?.to_str()?)
+}
+
+#[cfg(not(feature = "tree-sitter"))]
 fn language_of(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()? {
         "rs" => Some("rust"),
@@ -74,13 +84,37 @@ fn language_of(path: &Path) -> Option<&'static str> {
         "ts" | "tsx" => Some("typescript"),
         "js" | "jsx" => Some("javascript"),
         "java" => Some("java"),
-        "kt" => Some("kotlin"),
-        "swift" => Some("swift"),
-        "c" | "h" => Some("c"),
-        "cc" | "cpp" | "hpp" => Some("cpp"),
-        "cs" => Some("csharp"),
         _ => None,
     }
+}
+
+/// The parser this build uses.
+///
+/// Real grammars when compiled in, line scanning otherwise. Both satisfy
+/// [`CodeParser`], so nothing downstream changes — which is the whole point of
+/// the seam (Hard Rule #7).
+#[cfg(feature = "tree-sitter")]
+fn parser() -> impl CodeParser {
+    crate::TreeSitterParser
+}
+
+#[cfg(not(feature = "tree-sitter"))]
+fn parser() -> impl CodeParser {
+    HeuristicParser
+}
+
+/// Languages this build can index, for error messages that tell the truth
+/// about the binary in front of you rather than about some other build.
+#[cfg(feature = "tree-sitter")]
+fn supported() -> String {
+    crate::parse_ts::supported_languages().join(", ")
+}
+
+#[cfg(not(feature = "tree-sitter"))]
+fn supported() -> String {
+    "rust, python, go, typescript, javascript, java (build with the \
+     `tree-sitter` feature for 30)"
+        .to_string()
 }
 
 /// What one indexed symbol needs to be retrieved, scored and packed.
@@ -148,12 +182,13 @@ impl CodeMemory {
         files.sort();
         if files.is_empty() {
             return Err(MnesioError::Index(format!(
-                "no supported source files under {} — supported: rust, python, \
-                 go, typescript, javascript, java, kotlin, swift, c, c++, c#",
-                root.display()
+                "no supported source files under {} — supported: {}",
+                root.display(),
+                supported()
             )));
         }
 
+        let parser = parser();
         let mut parsed: Vec<ParsedFile> = Vec::new();
         let mut module_docs: HashMap<String, String> = HashMap::new();
         let mut decl: HashMap<(String, String), (Option<String>, SymbolKind)> = HashMap::new();
@@ -170,7 +205,7 @@ impl CodeMemory {
             let (Some(lang), Ok(src)) = (language_of(file), std::fs::read_to_string(file)) else {
                 continue;
             };
-            let Ok(pf) = HeuristicParser.parse(&rel, lang, &src) else {
+            let Ok(pf) = parser.parse(&rel, lang, &src) else {
                 continue;
             };
             if let Some(doc) = &pf.module_doc {
@@ -464,6 +499,31 @@ mod tests {
             ctx.tokens_used <= 50,
             "packed {} tokens into a 50 budget",
             ctx.tokens_used
+        );
+    }
+
+    /// The wiring test: a language only the grammar parser can read must
+    /// actually index through `CodeMemory`, not just through the parser in
+    /// isolation. Without this, `TreeSitterParser` could be fully working and
+    /// still unreachable from the entry point — which is exactly what it was
+    /// before this test existed.
+    #[cfg(feature = "tree-sitter")]
+    #[tokio::test]
+    async fn a_grammar_only_language_reaches_the_entry_point() {
+        let repo = TempRepo::new(&[(
+            "app/greeter.rb",
+            "class Greeter\n  def greet_user\n    puts 'hi'\n  end\nend\n",
+        )]);
+        let mem = CodeMemory::index(&repo.0, Scope::global("t"), embedder())
+            .await
+            .unwrap();
+        assert_eq!(mem.stats().files, 1, "ruby was not indexed at all");
+
+        let ctx = mem.context_for("greet user", 4000).await.unwrap();
+        assert!(
+            ctx.hits.iter().any(|h| h.name == "greet_user"),
+            "got {:?}",
+            ctx.hits.iter().map(|h| &h.name).collect::<Vec<_>>()
         );
     }
 

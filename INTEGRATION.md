@@ -32,6 +32,7 @@ For **OpenClaw** and **Hermes** the path is **MCP** — both are MCP clients:
 |---|---|---|---|
 | `mnesio_write_memory` | `content` (string) | `tenant` (string) | append a memory to the log (async embed/evolve off the write path) |
 | `mnesio_search` | `query` (string) | `tenant`, `k` (int) | hybrid retrieval (vector + BM25 + RRF); returns memories + citations |
+| `mnesio_code_context` | `repo` (path), `task` (string) | `budget_tokens`, `tenant`, `refresh` | index a repository and return only the symbols a task needs, packed to a hard token ceiling |
 | `mnesio_record_outcome` | `artifacts_used` (string[]), `success` (bool) | `episode`, `scores` (obj), `error` | feed an agent task outcome to the **gated** procedural compiler for credit assignment |
 
 `tenant` is mnesio's scope boundary (Hard Rule #3) — give each user/agent its own
@@ -168,3 +169,56 @@ better and can take it back."
 3. **Value at scale (the moat):** `mnesio-bench` measures recall@k, latency
    p50/p95/p99, and throughput at 1k–100k memories, plus the procedural learning
    curve. See [`BENCHMARKS.md`](BENCHMARKS.md) for the real numbers.
+
+
+## Code context in any editor
+
+`mnesio_code_context` is why MCP is the distribution channel: Claude Code,
+Cursor, Codex, GitHub Copilot's agent mode, Windsurf and Zed all speak the same
+protocol, so one stdio server reaches every one of them with no per-editor
+adapter.
+
+Point it at a repository and describe the change you are making — not keywords.
+The retrieval settings were measured against task-shaped queries derived from
+real commit history, so "make the retry backoff configurable" retrieves better
+than "retry backoff".
+
+```jsonc
+{
+  "mcpServers": {
+    "mnesio": {
+      "command": "/absolute/path/to/mnesio-mcp",
+      "env": { "MNESIO_DATA_DIR": "/absolute/path/to/mnesio-data" }
+    }
+  }
+}
+```
+
+The same block works in Claude Code (`.mcp.json` or `claude mcp add`), Cursor
+(`.cursor/mcp.json`), Windsurf, Zed and Codex. Copilot agent mode uses
+`.vscode/mcp.json` with a `servers` key instead of `mcpServers`; the inner
+object is identical.
+
+### What it returns
+
+Each symbol carries its path, its kind, and **why it is there** — either
+retrieval matched your task, or it was pulled in as a callee of something that
+did. Symbols that do not fit the budget degrade to their signature before being
+dropped, and the ceiling is never exceeded.
+
+### Two things to know
+
+- **The first call on a repository indexes it** and is slow; later calls are
+  fast. The index lives for the life of the server process.
+- **Edits after that first call are not reflected** until you pass
+  `refresh: true` or restart. This is a deliberate simplicity trade, and it is
+  stated here rather than left to be discovered: serving stale code to an agent
+  that is editing that code is this tool's worst failure mode.
+
+### Language coverage
+
+Six languages in a default build; **30** with `--features tree-sitter`
+(rust, python, javascript, typescript, tsx, go, java, c, c++, c#, ruby, php,
+swift, lua, elixir, ocaml ×3, r, dart, solidity, elm, kotlin, zig, haskell,
+julia, objc, hcl/terraform, scala, bash). The error you get on an unindexable
+repository lists what *your* build supports, not what some other build does.

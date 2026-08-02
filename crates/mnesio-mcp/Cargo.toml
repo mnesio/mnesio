@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 mnesio-core.workspace = true
 mnesio-store.workspace = true
+mnesio-code.workspace = true
 mnesio-index.workspace = true
 tokio = { workspace = true }
 serde.workspace = true

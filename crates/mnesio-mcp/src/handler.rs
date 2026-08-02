@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_three_tools() {
+    async fn tools_list_advertises_every_tool() {
         let (_dir, ctx) = fresh_ctx().await;
         let r = handle_request(&ctx, req(2, "tools/list", json!({})))
             .await
@@ -190,10 +190,24 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 3);
-        assert!(names.contains(&"mnesio_write_memory".to_string()));
-        assert!(names.contains(&"mnesio_search".to_string()));
-        assert!(names.contains(&"mnesio_record_outcome".to_string()));
+        // Names, not a count: a count fails every time a tool is added, which
+        // trains whoever sees it to bump the number rather than check that the
+        // new tool is actually advertised.
+        for want in [
+            "mnesio_write_memory",
+            "mnesio_search",
+            "mnesio_record_outcome",
+            "mnesio_code_context",
+        ] {
+            assert!(
+                names.contains(&want.to_string()),
+                "{want} missing: {names:?}"
+            );
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "duplicate tool name: {names:?}");
     }
 
     #[tokio::test]
