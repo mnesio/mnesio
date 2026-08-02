@@ -35,7 +35,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, Result};
 
-use crate::codeeval::CodeQuery;
+use crate::codeeval::{CodeQuery, Gold};
 
 /// Commits touching more symbols than this are dropped: with a large gold set,
 /// "retrieved at least one" stops discriminating between arms.
@@ -154,7 +154,7 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
         .min(targets.len().max(1));
     let chunk = targets.len().div_ceil(threads);
 
-    let traced: Vec<(String, String, String)> = std::thread::scope(|s| {
+    let traced: Vec<(String, String, String, String)> = std::thread::scope(|s| {
         let handles: Vec<_> = targets
             .chunks(chunk.max(1))
             .map(|part| {
@@ -162,7 +162,7 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
                     let mut out = Vec::new();
                     for t in part {
                         for (sha, subject) in commits_touching(repo, t) {
-                            out.push((sha, subject, t.name.clone()));
+                            out.push((sha, subject, t.path.clone(), t.name.clone()));
                         }
                     }
                     out
@@ -179,16 +179,17 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
     // sha -> (subject, gold symbol names). BTreeMap so the suite is
     // deterministic across runs; a benchmark whose contents shift between
     // invocations cannot support a paired comparison.
-    let mut by_commit: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-    for (sha, subject, name) in traced {
+    let mut by_commit: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
+    for (sha, subject, path, name) in traced {
         if !usable_subject(&subject) {
             continue;
         }
         let e = by_commit
             .entry(sha)
             .or_insert_with(|| (subject, Vec::new()));
-        if !e.1.contains(&name) {
-            e.1.push(name);
+        let key = (path, name);
+        if !e.1.contains(&key) {
+            e.1.push(key);
         }
     }
 
@@ -197,7 +198,14 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
         .filter(|(_, (_, gold))| !gold.is_empty() && gold.len() <= MAX_GOLD)
         .map(|(_, (subject, gold))| CodeQuery {
             question: subject,
-            gold,
+            gold: gold
+                .into_iter()
+                .map(|(path, name)| Gold {
+                    // Path-qualified: `__init__` and `new` are not unique.
+                    path: Some(path),
+                    name,
+                })
+                .collect(),
         })
         .collect();
     suite.truncate(limit);

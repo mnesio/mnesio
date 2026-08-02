@@ -13,6 +13,8 @@ fn main() {
         Some("go") => "go",
         Some("ts") => "typescript",
         Some("js") => "javascript",
+        Some("py") => "python",
+        Some("java") => "java",
         other => other.unwrap_or("rust"),
     };
 

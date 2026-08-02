@@ -250,10 +250,18 @@ impl CodeIndexer {
         // the natural-language surface of a symbol — often the only place words
         // like "reciprocal rank fusion" appear near `HybridRetriever` — so it
         // has to be inside the indexed, retrieved unit, not beside it.
-        let content = match &symbol.doc {
-            Some(doc) if !doc.is_empty() => format!("{doc}\n{}", symbol.text),
-            _ => symbol.text.clone(),
-        };
+        // NOTE(phase-17b): `file.module_doc` is deliberately *not* indexed.
+        // Module prose having no owner is the measured cause of the symbol
+        // arm's recall ceiling, but both obvious fixes made it worse — see
+        // [`ParsedFile::module_doc`] for the numbers. It stays parsed and
+        // available for the 17B packer, which can attach it to a *result set*
+        // rather than to every symbol.
+        let mut content = String::new();
+        if let Some(doc) = symbol.doc.as_deref().filter(|d| !d.is_empty()) {
+            content.push_str(doc);
+            content.push('\n');
+        }
+        content.push_str(&symbol.text);
 
         let mut keywords = vec![symbol.name.clone()];
         keywords.extend(identifier_words(&symbol.name));

@@ -3,10 +3,10 @@
 //! Two implementations, following the same pattern as the LLM and KV backends
 //! (Hard Rule #7 — every external dependency behind a trait):
 //!
-//! - [`HeuristicParser`] — always compiled, zero dependencies. Line-scanning
-//!   with brace matching. Honest about what it is: **not an AST**. It handles
-//!   brace-delimited languages (Rust, Go, TypeScript, Java, C-likes) and is what
-//!   the test suite runs on, so CI stays fast and offline.
+//! - [`HeuristicParser`] — always compiled, zero dependencies. Line scanning,
+//!   with brace matching for C-likes and column counting for Python. Honest
+//!   about what it is: **not an AST**. It is what the test suite runs on, so
+//!   CI stays fast and offline.
 //! - `TreeSitterParser` — real grammars, behind the `tree-sitter` feature.
 //!   `TODO(phase-17): land this once 17A's event mapping is settled.`
 //!
@@ -15,15 +15,22 @@
 //! Stated plainly, because the difference matters when you read a retrieval
 //! result and wonder why something is missing:
 //!
-//! - **Indentation-based languages (Python) are not supported** — brace matching
-//!   has nothing to match. Use the `tree-sitter` feature for those.
+//! - **Two block strategies.** Brace-delimited languages (Rust, Go,
+//!   TypeScript, Java, C-likes) are matched on `{}`; Python is delimited by
+//!   indentation, counting columns and treating blank/comment lines as
+//!   structurally transparent. Any other language is *rejected*, never parsed
+//!   into plausible nonsense.
 //! - **Call targets are matched by bare name.** `parse(..)` binds to a symbol
 //!   named `parse` if exactly one is in scope; overloads and methods on
 //!   different types with the same name are ambiguous, and resolution across
 //!   files is name-only — there is no type inference. Edges are therefore a
 //!   *good retrieval signal*, not a compiler-grade call graph.
-//! - **Nested definitions** (a function inside a function) are attributed to the
-//!   outermost definition.
+//! - **Nested definitions** are attributed to the outermost definition — in
+//!   brace languages only. Python indexes methods separately from their class,
+//!   because a class body there is the normal home for retrievable code.
+//! - **The file header is a symbol.** `//!`, a leading Python docstring, or a
+//!   top-of-file `/** … */` becomes a [`SymbolKind::Module`] symbol, so
+//!   module-level prose has an owner in the index instead of being dropped.
 
 use crate::{CodeEdge, EdgeKind, ParsedFile, Symbol, SymbolKind};
 
@@ -40,8 +47,8 @@ impl std::fmt::Display for ParseError {
             ParseError::UnsupportedLanguage(l) => {
                 write!(
                     f,
-                    "no parser for language {l:?} (indentation-based languages \
-                     need the `tree-sitter` feature)"
+                    "no parser for language {l:?} (supported: brace-delimited \
+                     C-likes and Python; others need the `tree-sitter` feature)"
                 )
             }
         }
@@ -93,8 +100,15 @@ const CALL_KEYWORDS: &[&str] = &[
     "await", "async", "and", "or", "not", "in", "is", "new", "typeof", "sizeof", "defer", "go",
 ];
 
+/// Languages whose blocks are delimited by **indentation**, so `block_end` has
+/// to count columns rather than braces.
+const INDENT_LANGUAGES: &[&str] = &["python"];
+
 impl CodeParser for HeuristicParser {
     fn parse(&self, path: &str, language: &str, source: &str) -> Result<ParsedFile, ParseError> {
+        if INDENT_LANGUAGES.contains(&language) {
+            return Ok(parse_indented(path, language, source));
+        }
         if !BRACE_LANGUAGES.contains(&language) {
             return Err(ParseError::UnsupportedLanguage(language.to_string()));
         }
@@ -159,9 +173,236 @@ impl CodeParser for HeuristicParser {
         Ok(ParsedFile {
             path: path.to_string(),
             language: language.to_string(),
+            module_doc: module_doc(&lines, language),
             symbols,
             edges,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Module-level prose
+// ---------------------------------------------------------------------------
+
+/// The leading documentation block of a file, cleaned of comment markers.
+fn module_doc(lines: &[&str], language: &str) -> Option<String> {
+    if INDENT_LANGUAGES.contains(&language) {
+        // Python: the module docstring is the file's first statement.
+        let first = lines.iter().position(|l| indent_of(l).is_some())?;
+        return python_docstring_at(lines, first);
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut in_block = false;
+    for line in lines {
+        let t = line.trim();
+        if in_block {
+            if let Some(body) = t.strip_suffix("*/") {
+                push_doc_line(&mut out, body.trim_start_matches('*'));
+                break;
+            }
+            push_doc_line(&mut out, t.trim_start_matches('*'));
+            continue;
+        }
+        if let Some(d) = t.strip_prefix("//!") {
+            push_doc_line(&mut out, d);
+        } else if t.starts_with("/**") || t.starts_with("/*!") {
+            in_block = true;
+            push_doc_line(&mut out, &t[3..]);
+        } else if t.is_empty() || t.starts_with("#!") {
+            // Blank lines and a shebang sit above/inside the header block.
+            continue;
+        } else {
+            // First real code line: the header is over. Anything after this is
+            // a symbol's own doc, not the module's.
+            break;
+        }
+    }
+    let joined = out.join("\n").trim().to_string();
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn push_doc_line(out: &mut Vec<String>, s: &str) {
+    let t = s.trim();
+    if !t.is_empty() || out.last().is_some_and(|l| !l.is_empty()) {
+        out.push(t.to_string());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Indentation-based languages (Python)
+// ---------------------------------------------------------------------------
+
+/// Column at which a line's content starts, or `None` for blank/comment lines,
+/// which carry no block structure and must not end one.
+fn indent_of(line: &str) -> Option<usize> {
+    let t = line.trim_start();
+    if t.is_empty() || t.starts_with('#') {
+        return None;
+    }
+    Some(line.len() - t.len())
+}
+
+/// Recognise a Python definition, returning kind, name, and its indent column.
+///
+/// A method is distinguished from a function purely by being indented — inside
+/// a `class` body — which is what Python itself means by the distinction.
+fn python_definition_at(line: &str) -> Option<(SymbolKind, String, usize)> {
+    let indent = indent_of(line)?;
+    let t = line.trim_start();
+    let rest = t.strip_prefix("async ").unwrap_or(t);
+
+    let (kw, base) = if let Some(r) = rest.strip_prefix("def ") {
+        (
+            r,
+            if indent > 0 {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            },
+        )
+    } else if let Some(r) = rest.strip_prefix("class ") {
+        (r, SymbolKind::Class)
+    } else {
+        return None;
+    };
+
+    let name: String = kw
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    // pytest and unittest both key off the `test_` prefix, so this is the
+    // convention rather than a guess.
+    let kind = if base != SymbolKind::Class && name.starts_with("test_") {
+        SymbolKind::Test
+    } else {
+        base
+    };
+    Some((kind, name, indent))
+}
+
+/// Last line of the block opened at `start`, by indentation.
+///
+/// The block runs until a line whose indent is less than or equal to the
+/// definition's. Blank and comment lines are skipped rather than treated as
+/// dedents, and trailing blanks are trimmed so a symbol's text does not absorb
+/// the gap before the next definition.
+fn python_block_end(lines: &[&str], start: usize, def_indent: usize) -> usize {
+    let mut end = start;
+    for (offset, line) in lines[start + 1..].iter().enumerate() {
+        match indent_of(line) {
+            None => continue,
+            Some(i) if i > def_indent => end = start + 1 + offset,
+            Some(_) => break,
+        }
+    }
+    end
+}
+
+/// The docstring opening at `idx`, if the line starts one.
+///
+/// Python puts a symbol's prose *inside* its body as the first statement, not
+/// above it in comments — so [`doc_comment_above`] finds nothing for Python and
+/// the richest natural-language signal in the file would be lost. Returns the
+/// text with quotes stripped.
+fn python_docstring_at(lines: &[&str], idx: usize) -> Option<String> {
+    let t = lines.get(idx)?.trim();
+    let quote = if t.starts_with("\"\"\"") {
+        "\"\"\""
+    } else if t.starts_with("'''") {
+        "'''"
+    } else {
+        return None;
+    };
+
+    let first = &t[quote.len()..];
+    // Single-line docstring: `"""Load the config."""`
+    if let Some(body) = first.strip_suffix(quote) {
+        return Some(body.trim().to_string());
+    }
+
+    let mut out = Vec::new();
+    if !first.trim().is_empty() {
+        out.push(first.trim().to_string());
+    }
+    for line in &lines[idx + 1..] {
+        let t = line.trim();
+        if let Some(body) = t.strip_suffix(quote) {
+            if !body.trim().is_empty() {
+                out.push(body.trim().to_string());
+            }
+            break;
+        }
+        out.push(t.to_string());
+    }
+    let joined = out.join("\n").trim().to_string();
+    (!joined.is_empty()).then_some(joined)
+}
+
+/// Find a definition's docstring: the first statement of its body, skipping the
+/// continuation lines of a multi-line signature.
+fn python_doc_for(lines: &[&str], def_line: usize, end: usize) -> Option<String> {
+    // A signature can wrap; the body starts after the line ending in `:`.
+    let mut i = def_line;
+    while i <= end && !lines[i].trim_end().ends_with(':') {
+        i += 1;
+    }
+    for j in i + 1..=end.min(lines.len().saturating_sub(1)) {
+        match indent_of(lines[j]) {
+            None => continue,
+            Some(_) => return python_docstring_at(lines, j),
+        }
+    }
+    None
+}
+
+/// Parse an indentation-delimited file.
+///
+/// Unlike the brace path this does **not** skip a block's interior: a class body
+/// contains methods that are themselves worth retrieving, and skipping them
+/// would leave a Python codebase with one memory per class.
+fn parse_indented(path: &str, language: &str, source: &str) -> ParsedFile {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+
+    for i in 0..lines.len() {
+        let Some((kind, name, indent)) = python_definition_at(lines[i]) else {
+            continue;
+        };
+        let end = python_block_end(&lines, i, indent);
+        let symbol = Symbol {
+            name,
+            kind,
+            path: path.to_string(),
+            signature: Some(lines[i].trim().trim_end_matches(':').trim().to_string()),
+            doc: python_doc_for(&lines, i, end),
+            start_line: (i + 1) as u32,
+            end_line: (end + 1) as u32,
+            text: lines[i..=end].join("\n"),
+        };
+        if has_executable_body(symbol.kind) {
+            for callee in call_names(&lines[i..=end], &symbol.name) {
+                edges.push(CodeEdge {
+                    from: symbol.key(),
+                    to_name: callee,
+                    kind: EdgeKind::Calls,
+                });
+            }
+        }
+        symbols.push(symbol);
+    }
+
+    ParsedFile {
+        path: path.to_string(),
+        language: language.to_string(),
+        module_doc: module_doc(&lines, language),
+        symbols,
+        edges,
     }
 }
 
@@ -426,12 +667,206 @@ fn load_config_works() {
     }
 
     #[test]
-    fn indentation_languages_are_rejected_not_silently_wrong() {
-        let err = HeuristicParser.parse("a.py", "python", "def f():\n    pass\n");
+    fn unknown_languages_are_rejected_not_silently_wrong() {
+        let err = HeuristicParser.parse("a.hs", "haskell", "f x = x\n");
         assert_eq!(
             err,
-            Err(ParseError::UnsupportedLanguage("python".into())),
+            Err(ParseError::UnsupportedLanguage("haskell".into())),
             "returning empty symbols would look like an empty file"
+        );
+    }
+
+    // --- module-level prose ---
+
+    #[test]
+    fn the_file_header_is_captured_as_module_doc() {
+        // Regression for the measured 17B miss: "bm25 tantivy search view"
+        // could not reach `Bm25View`, because the struct has no doc of its own
+        // and those words live only in the `//!` header. The indexer turns this
+        // into a one-line breadcrumb on every symbol in the file.
+        let src = "//! BM25 search view over tantivy.\n//!\n//! Scope-filtered.\n\n\
+                   /// A struct.\npub struct Bm25View { a: u8 }\n";
+        let f = HeuristicParser.parse("src/bm25.rs", "rust", src).unwrap();
+
+        let doc = f.module_doc.as_deref().expect("module header was dropped");
+        assert!(doc.starts_with("BM25 search view over tantivy"));
+        assert!(doc.contains("Scope-filtered"), "block truncated early");
+        assert!(
+            !doc.contains("A struct"),
+            "swallowed the next symbol's own doc: {doc:?}"
+        );
+        // The header must not become a symbol of its own — one that competes
+        // for retrieval slots with the definitions it describes.
+        assert!(!f.symbols.iter().any(|s| s.kind == SymbolKind::Module));
+    }
+
+    #[test]
+    fn a_file_without_a_header_has_no_module_doc() {
+        let f = HeuristicParser
+            .parse("a.rs", "rust", "pub fn go() {}\n")
+            .unwrap();
+        assert_eq!(f.module_doc, None);
+    }
+
+    #[test]
+    fn block_and_python_headers_are_both_recognised() {
+        let ts = HeuristicParser
+            .parse(
+                "a.ts",
+                "typescript",
+                "/**\n * Retry helper for the API client.\n */\nexport function go() {}\n",
+            )
+            .unwrap();
+        assert!(
+            ts.module_doc
+                .as_deref()
+                .is_some_and(|d| d.contains("Retry helper")),
+            "/** */ header not captured: {:?}",
+            ts.module_doc
+        );
+
+        assert!(
+            py().module_doc
+                .as_deref()
+                .is_some_and(|d| d.contains("Vector store index module")),
+            "python module docstring not captured"
+        );
+    }
+
+    // --- Python (indentation) ---
+
+    const PY: &str = "\
+\"\"\"Vector store index module.\"\"\"
+
+class VectorStoreIndex(BaseIndex):
+    \"\"\"An index backed by a vector store.
+
+    Builds embeddings for each node.
+    \"\"\"
+
+    def __init__(self, nodes):
+        self._nodes = nodes
+
+    async def as_retriever(self, top_k=10):
+        '''Return a retriever over this index.'''
+        return VectorIndexRetriever(self, top_k)
+
+
+def build_index_from_nodes(nodes):
+    \"\"\"Construct an index from parsed nodes.\"\"\"
+    return VectorStoreIndex(nodes)
+
+
+def test_build_index():
+    assert build_index_from_nodes([]) is not None
+";
+
+    fn py() -> ParsedFile {
+        HeuristicParser.parse("idx.py", "python", PY).unwrap()
+    }
+
+    #[test]
+    fn python_blocks_are_delimited_by_indentation() {
+        let f = py();
+        let class = f
+            .symbols
+            .iter()
+            .find(|s| s.name == "VectorStoreIndex")
+            .unwrap();
+        assert_eq!(class.kind, SymbolKind::Class);
+        // The class must span its methods and stop before the next top-level
+        // def — the whole point of counting columns instead of braces.
+        assert_eq!((class.start_line, class.end_line), (3, 14));
+
+        let free = f
+            .symbols
+            .iter()
+            .find(|s| s.name == "build_index_from_nodes")
+            .unwrap();
+        assert_eq!(free.kind, SymbolKind::Function);
+        assert_eq!((free.start_line, free.end_line), (17, 19));
+    }
+
+    #[test]
+    fn python_methods_are_indexed_separately_from_their_class() {
+        // The brace path skips a block's interior, which for Python would leave
+        // one memory per class and make every method unretrievable.
+        let f = py();
+        for want in ["__init__", "as_retriever"] {
+            let m = f
+                .symbols
+                .iter()
+                .find(|s| s.name == want)
+                .unwrap_or_else(|| panic!("method {want} was swallowed by its class"));
+            assert_eq!(m.kind, SymbolKind::Method, "indented def is a method");
+        }
+    }
+
+    #[test]
+    fn python_docstrings_are_captured_as_the_doc() {
+        // Python puts prose *inside* the body, so `doc_comment_above` finds
+        // nothing — without this the richest text in a Python file is lost.
+        let f = py();
+        let class = f
+            .symbols
+            .iter()
+            .find(|s| s.name == "VectorStoreIndex")
+            .unwrap();
+        let doc = class.doc.as_deref().unwrap_or_default();
+        assert!(
+            doc.contains("An index backed by a vector store"),
+            "got {doc:?}"
+        );
+        assert!(
+            doc.contains("Builds embeddings"),
+            "multi-line body lost: {doc:?}"
+        );
+
+        // Single-line, and the `'''` spelling.
+        let m = f.symbols.iter().find(|s| s.name == "as_retriever").unwrap();
+        assert_eq!(
+            m.doc.as_deref(),
+            Some("Return a retriever over this index.")
+        );
+    }
+
+    #[test]
+    fn python_tests_are_recognised_by_the_naming_convention() {
+        // pytest and unittest both key off `test_`; there is no attribute to
+        // look for as there is in Rust.
+        let f = py();
+        let t = f
+            .symbols
+            .iter()
+            .find(|s| s.name == "test_build_index")
+            .unwrap();
+        assert_eq!(t.kind, SymbolKind::Test);
+    }
+
+    #[test]
+    fn python_calls_become_edges() {
+        let f = py();
+        let has = |from: &str, to: &str| {
+            f.edges
+                .iter()
+                .any(|e| e.from.ends_with(from) && e.to_name == to)
+        };
+        assert!(has("as_retriever", "VectorIndexRetriever"));
+        assert!(has("build_index_from_nodes", "VectorStoreIndex"));
+    }
+
+    #[test]
+    fn python_comments_and_blank_lines_do_not_close_a_block() {
+        // A `#` comment at column 0 inside an indented body would look like a
+        // dedent to a naive scanner and truncate the symbol.
+        let src =
+            "def f():\n    a = 1\n\n# stray comment at column 0\n    b = 2\n\ndef g():\n    pass\n";
+        let f = HeuristicParser.parse("a.py", "python", src).unwrap();
+        let g = f.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert!(
+            g.text.contains("b = 2"),
+            "block ended early at a comment: {:?}",
+            g.text
         );
     }
 

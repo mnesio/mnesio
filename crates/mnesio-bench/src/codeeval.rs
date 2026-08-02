@@ -57,17 +57,35 @@ fn est_tokens(s: &str) -> usize {
     s.len().div_ceil(4)
 }
 
+/// A symbol a correct retrieval must surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gold {
+    /// Repo-relative file the symbol is defined in.
+    ///
+    /// `None` matches on name alone, which is only safe for a hand-written
+    /// suite whose answers are known-unique. A derived suite **must** qualify
+    /// by path: `__init__` exists once per Python class and `new` once per
+    /// Rust type, so a bare-name match would score retrieving *any* file's
+    /// constructor as a hit and inflate every arm.
+    pub path: Option<String>,
+    pub name: String,
+}
+
 /// One task and the symbols that answer it.
 pub struct CodeQuery {
     pub question: String,
-    /// Symbols a correct retrieval must surface. Scored as "at least one",
-    /// the realistic agent criterion: the task lands you in the right code.
-    pub gold: Vec<String>,
+    /// Scored as "at least one", the realistic agent criterion: the task lands
+    /// you in the right code.
+    pub gold: Vec<Gold>,
 }
 
 impl CodeQuery {
     fn hit(&self, retrieved: &[&SymbolInfo]) -> bool {
-        retrieved.iter().any(|s| self.gold.contains(&s.name))
+        retrieved.iter().any(|s| {
+            self.gold
+                .iter()
+                .any(|g| g.name == s.name && g.path.as_ref().map_or(true, |p| *p == s.path))
+        })
     }
 }
 
@@ -101,7 +119,11 @@ pub fn hand_written_suite() -> Vec<CodeQuery> {
     .into_iter()
     .map(|(q, g)| CodeQuery {
         question: q.to_string(),
-        gold: vec![g.to_string()],
+        // Name-only: every answer here is a uniquely-named type in one crate.
+        gold: vec![Gold {
+            path: None,
+            name: g.to_string(),
+        }],
     })
     .collect()
 }
@@ -217,17 +239,14 @@ struct SymbolInfo {
 /// the two concerns from tangling.
 pub fn trace_targets(dir: &str) -> Result<Vec<crate::gitsuite::TraceTarget>> {
     let root = std::path::Path::new(dir);
+    let base = path_base(root);
     let mut paths = Vec::new();
     collect_sources(root, &mut paths);
     paths.sort();
 
     let mut out = Vec::new();
     for p in &paths {
-        let key = p
-            .strip_prefix(root)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .to_string();
+        let key = relative_key(p, &base);
         let (Some(lang), Ok(src)) = (language_of(p), std::fs::read_to_string(p)) else {
             continue;
         };
@@ -255,6 +274,7 @@ pub fn trace_targets(dir: &str) -> Result<Vec<crate::gitsuite::TraceTarget>> {
 fn language_of(path: &std::path::Path) -> Option<&'static str> {
     match path.extension()?.to_str()? {
         "rs" => Some("rust"),
+        "py" => Some("python"),
         "go" => Some("go"),
         "ts" | "tsx" => Some("typescript"),
         "java" => Some("java"),
@@ -276,6 +296,37 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
     "__pycache__",
 ];
+
+/// Enclosing git repository of `dir`, if there is one.
+///
+/// Indexing is routinely pointed at a *subdirectory* (`llama-index-core`) of a
+/// repo whose `.git` lives further up. Paths are therefore made relative to the
+/// git root rather than to the indexed directory, because that is the only form
+/// `git log -L <a>,<b>:<path>` can resolve — pointing at a subdirectory
+/// otherwise fails with "not a git repository" or, worse, silently traces
+/// nothing.
+pub fn git_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    dir.canonicalize()
+        .ok()?
+        .ancestors()
+        .find(|p| p.join(".git").exists())
+        .map(|p| p.to_path_buf())
+}
+
+/// Base directory that indexed paths are expressed relative to.
+fn path_base(dir: &std::path::Path) -> std::path::PathBuf {
+    git_root(dir).unwrap_or_else(|| dir.to_path_buf())
+}
+
+/// Path of `file` relative to `base`, as the index and git both see it.
+fn relative_key(file: &std::path::Path, base: &std::path::Path) -> String {
+    file.canonicalize()
+        .ok()
+        .and_then(|c| c.strip_prefix(base).ok().map(|r| r.to_path_buf()))
+        .unwrap_or_else(|| file.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
 
 /// Recursively collect parseable source files.
 fn collect_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -308,6 +359,7 @@ pub async fn run_codeeval(
 
     // --- parse ---
     let root = std::path::Path::new(dir);
+    let base = path_base(root);
     let mut paths = Vec::new();
     collect_sources(root, &mut paths);
     paths.sort();
@@ -322,11 +374,7 @@ pub async fn run_codeeval(
     for p in &paths {
         // Index by *repo-relative* path: that is what `Source::uri` means, and
         // it is the path `git log -L` needs to trace a symbol's history.
-        let key = p
-            .strip_prefix(root)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .to_string();
+        let key = relative_key(p, &base);
         let (Some(lang), Ok(src)) = (language_of(p), std::fs::read_to_string(p)) else {
             continue;
         };
@@ -430,7 +478,7 @@ pub async fn run_codeeval(
                 eprintln!(
                     "  q={:?} want={:?} got={:?}",
                     q.question,
-                    q.gold,
+                    q.gold.iter().map(|g| &g.name).collect::<Vec<_>>(),
                     picked.iter().map(|s| &s.name).collect::<Vec<_>>()
                 );
             }

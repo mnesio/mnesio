@@ -1547,7 +1547,9 @@ fn parse_codeeval(
 }
 
 async fn cmd_codeeval(opts: CodeEvalOpts) -> Result<()> {
-    use mnesio_bench::codeeval::{format_report, hand_written_suite, run_codeeval, trace_targets};
+    use mnesio_bench::codeeval::{
+        self, format_report, hand_written_suite, run_codeeval, trace_targets,
+    };
     use mnesio_bench::gitsuite;
 
     let suite = match opts.suite.as_str() {
@@ -1578,7 +1580,11 @@ async fn cmd_codeeval(opts: CodeEvalOpts) -> Result<()> {
                 sampled.len(),
                 all.len()
             );
-            let s = gitsuite::derive(&opts.dir, &sampled, opts.queries)?;
+            // Trace against the enclosing repository: indexing is routinely
+            // pointed at a subdirectory whose `.git` lives further up.
+            let repo = codeeval::git_root(std::path::Path::new(&opts.dir))
+                .ok_or_else(|| anyhow::anyhow!("{} is not inside a git repository", opts.dir))?;
+            let s = gitsuite::derive(&repo.to_string_lossy(), &sampled, opts.queries)?;
             if s.is_empty() {
                 bail!(
                     "no usable queries derived from {}'s history — the repo may \

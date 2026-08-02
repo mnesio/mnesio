@@ -51,8 +51,12 @@ pub enum SymbolKind {
     Function,
     /// A method — a function attached to a type or class.
     Method,
-    /// A struct, class, record, or other product type.
+    /// A struct, record, or other product type.
     Struct,
+    /// A class. Split from [`SymbolKind::Struct`] because a Python or Java
+    /// class carries methods and inheritance, and tagging it `struct` would
+    /// mislead anyone filtering retrieval by kind.
+    Class,
     /// An enum / sum type.
     Enum,
     /// A trait, interface, or protocol.
@@ -76,6 +80,7 @@ impl SymbolKind {
             SymbolKind::Function => "function",
             SymbolKind::Method => "method",
             SymbolKind::Struct => "struct",
+            SymbolKind::Class => "class",
             SymbolKind::Enum => "enum",
             SymbolKind::Trait => "trait",
             SymbolKind::TypeAlias => "type_alias",
@@ -166,6 +171,17 @@ pub struct ParsedFile {
     pub path: String,
     /// Language tag (`rust`, `python`, …), used as a retrieval tag.
     pub language: String,
+    /// The file's own header prose — `//!` in Rust, a leading docstring in
+    /// Python, a top-of-file `/** … */` elsewhere.
+    ///
+    /// Kept on the *file* rather than turned into a symbol of its own. A
+    /// module memory competes for retrieval slots with the definitions it
+    /// describes, and can never *be* the symbol a query is looking for:
+    /// measured on `crates/mnesio-index/src`, emitting one dropped recall@1
+    /// from 50% to 25% and left the ceiling unmoved. Instead the indexer
+    /// prepends a one-line breadcrumb of this to every symbol in the file, so
+    /// each definition inherits the words that describe its module.
+    pub module_doc: Option<String>,
     pub symbols: Vec<Symbol>,
     /// Edges originating in this file, targets unresolved.
     pub edges: Vec<CodeEdge>,
@@ -205,6 +221,7 @@ mod tests {
             SymbolKind::Function,
             SymbolKind::Method,
             SymbolKind::Struct,
+            SymbolKind::Class,
             SymbolKind::Enum,
             SymbolKind::Trait,
             SymbolKind::TypeAlias,
