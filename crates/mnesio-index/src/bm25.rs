@@ -68,6 +68,11 @@ impl Bm25Tier {
 struct Fields {
     memory_id: Field,
     content: Field,
+    /// `Memory::keywords`. Indexed as its own field so a caller can make a
+    /// memory findable by terms that don't literally occur in its body — the
+    /// point of the field, and what Phase 17 leans on to make the identifier
+    /// `HybridRetriever` reachable from the words "hybrid retriever".
+    keywords: Field,
     tags: Field,
     tenant: Field,
     user: Field,
@@ -106,8 +111,10 @@ impl Bm25View {
             .set_indexing_options(stem_indexing.clone())
             .set_stored();
         let content = schema.add_text_field("content", content_options);
-        let tags_options = TextOptions::default().set_indexing_options(stem_indexing);
+        let tags_options = TextOptions::default().set_indexing_options(stem_indexing.clone());
         let tags = schema.add_text_field("tags", tags_options);
+        let keywords_options = TextOptions::default().set_indexing_options(stem_indexing);
+        let keywords = schema.add_text_field("keywords", keywords_options);
 
         let tenant = schema.add_text_field("tenant", STRING);
         let user = schema.add_text_field("user", STRING);
@@ -155,6 +162,7 @@ impl Bm25View {
             fields: Fields {
                 memory_id,
                 content,
+                keywords,
                 tags,
                 tenant,
                 user,
@@ -164,7 +172,8 @@ impl Bm25View {
         })
     }
 
-    /// BM25 search over content + tags, scope-filtered at the query layer.
+    /// BM25 search over content + keywords + tags, scope-filtered at the query
+    /// layer.
     ///
     /// Multi-word queries use **conjunction (AND)** by default — typing
     /// "Q3 earnings" requires *both* tokens to match somewhere, which matches
@@ -220,6 +229,7 @@ impl Bm25View {
                 let mut doc = TantivyDocument::default();
                 doc.add_text(self.fields.memory_id, m.id.to_string());
                 doc.add_text(self.fields.content, &m.content);
+                doc.add_text(self.fields.keywords, m.keywords.join(" "));
                 doc.add_text(self.fields.tags, m.tags.join(" "));
                 doc.add_text(self.fields.tenant, &m.scope.tenant);
                 if let Some(u) = &m.scope.user {
@@ -377,8 +387,10 @@ impl Bm25View {
         fuzzy: bool,
         conjunction: bool,
     ) -> Result<Option<Box<dyn Query>>, MnesioError> {
-        let mut parser =
-            QueryParser::for_index(&self.index, vec![self.fields.content, self.fields.tags]);
+        let mut parser = QueryParser::for_index(
+            &self.index,
+            vec![self.fields.content, self.fields.keywords, self.fields.tags],
+        );
         if conjunction {
             parser.set_conjunction_by_default();
         }
@@ -391,6 +403,7 @@ impl Bm25View {
             // Damerau-Levenshtein, so adjacent-character swaps like
             // "revneue → revenue" count as a single edit.
             parser.set_field_fuzzy(self.fields.content, false, 1, true);
+            parser.set_field_fuzzy(self.fields.keywords, false, 1, true);
             parser.set_field_fuzzy(self.fields.tags, false, 1, true);
         }
         let text_query = match parser.parse_query(sanitized) {
@@ -600,6 +613,35 @@ mod tests {
         assert!(!hits.is_empty(), "expected a hit for 'revenue'");
         assert_eq!(hits[0].memory, a_ref);
         assert_eq!(hits[0].breakdown[0].0, "bm25");
+    }
+
+    #[tokio::test]
+    async fn keywords_are_searchable_even_when_absent_from_content() {
+        // `Memory::keywords` exists to make a memory findable by terms that
+        // don't occur in its body. Phase 17 depends on it: a code symbol's
+        // name splits into keywords so "hybrid retriever" reaches
+        // `HybridRetriever`, whose body contains neither word.
+        let view = Bm25View::new().unwrap();
+        let scope = Scope::global("test");
+
+        let mut a = mem_with("pub struct HybridRetriever { a: u8 }", &[], scope.clone());
+        a.keywords = vec![
+            "HybridRetriever".into(),
+            "hybrid".into(),
+            "retriever".into(),
+        ];
+        let a_ref = MemoryRef(a.id);
+        let b = mem_with("pub struct Unrelated { b: u8 }", &[], scope.clone());
+
+        view.apply(&entry(Event::MemoryWritten(a))).await.unwrap();
+        view.apply(&entry(Event::MemoryWritten(b))).await.unwrap();
+
+        let hits = view.search("hybrid retriever", 5, &scope).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.memory),
+            Some(a_ref),
+            "keywords field is not being searched"
+        );
     }
 
     #[tokio::test]

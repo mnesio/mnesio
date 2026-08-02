@@ -21,6 +21,7 @@ mnesio-store.workspace = true
 mnesio-index.workspace = true
 mnesio-procedural.workspace = true
 mnesio-kv.workspace = true
+mnesio-code.workspace = true
 mnesio-llm = { workspace = true, default-features = false }
 tokio.workspace = true
 tracing.workspace = true

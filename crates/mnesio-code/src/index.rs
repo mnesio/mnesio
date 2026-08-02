@@ -28,6 +28,64 @@ use crate::{EdgeKind, ParsedFile, Symbol};
 /// without deserialising anything.
 pub const CODE_TAG: &str = "code";
 
+/// Split an identifier into the words a human would type when searching for it.
+///
+/// `HybridRetriever` → `["hybrid", "retriever"]`, `parse_config` → `["parse",
+/// "config"]`, `Bm25View` → `["bm25", "view"]`, `HTTPClient` → `["http",
+/// "client"]`.
+///
+/// This exists because a lexical index sees `HybridRetriever` as **one** token,
+/// so the query "hybrid retriever fusion" cannot match the very symbol it
+/// names. Every serious code-search engine splits identifiers for this reason;
+/// mnesio does it here rather than in the shared tokenizer so prose memories
+/// are unaffected. The parts land in `Memory::keywords`, which is indexed
+/// separately from the code body.
+///
+/// Trailing digits stay glued to the word they follow — people search for
+/// "bm25", never "bm 25" — so only a digit→upper transition splits, never
+/// alpha→digit. Getting this backwards costs recall on exactly the symbols
+/// whose names carry a version or standard number.
+fn identifier_words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+
+    for (i, &c) in chars.iter().enumerate() {
+        // `_`, `-`, `.` and friends separate; they are never content.
+        if !c.is_alphanumeric() {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        let prev = if i == 0 { None } else { Some(chars[i - 1]) };
+        let boundary = match prev {
+            None => false,
+            Some(p) => {
+                // camelCase, and the digit→upper flip in `v2Config`.
+                (c.is_uppercase() && (p.is_lowercase() || p.is_numeric()))
+                    // Acronym run ending: the `C` in `HTTPClient` starts the
+                    // next word because a lowercase letter follows it.
+                    || (c.is_uppercase()
+                        && p.is_uppercase()
+                        && chars.get(i + 1).is_some_and(|n| n.is_lowercase()))
+            }
+        };
+        if boundary && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        cur.extend(c.to_lowercase());
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    // A single-word identifier adds nothing over the name itself.
+    if words.len() < 2 {
+        words.clear();
+    }
+    words
+}
+
 /// Why an edge didn't become a link.
 ///
 /// Tracked and reported rather than silently dropped: resolution quality is the
@@ -188,14 +246,26 @@ impl CodeIndexer {
         source: SourceRef,
         position: u32,
     ) -> Memory {
+        // The doc comment leads the body, exactly as it does in the file. It is
+        // the natural-language surface of a symbol — often the only place words
+        // like "reciprocal rank fusion" appear near `HybridRetriever` — so it
+        // has to be inside the indexed, retrieved unit, not beside it.
+        let content = match &symbol.doc {
+            Some(doc) if !doc.is_empty() => format!("{doc}\n{}", symbol.text),
+            _ => symbol.text.clone(),
+        };
+
+        let mut keywords = vec![symbol.name.clone()];
+        keywords.extend(identifier_words(&symbol.name));
+
         Memory {
             id: id.0,
             scope: self.scope.clone(),
             // The symbol's own source is what gets retrieved and packed into an
             // agent's context — self-contained, unlike an arbitrary N-line
             // chunk that can slice a function in half.
-            content: symbol.text.clone(),
-            keywords: vec![symbol.name.clone()],
+            content,
+            keywords,
             tags: vec![
                 CODE_TAG.to_string(),
                 file.language.clone(),
@@ -317,8 +387,14 @@ mod tests {
         let m = memories(&plan)[0];
 
         assert!(m.content.contains("fn add"), "content is the code itself");
+        assert!(
+            m.content.contains("Adds numbers."),
+            "the doc leads the body, or the only natural-language description \
+             of the symbol is invisible to the lexical index: {:?}",
+            m.content
+        );
         assert_eq!(m.context, "Adds numbers.", "doc goes to the A-MEM X field");
-        assert_eq!(m.keywords, ["add"]);
+        assert_eq!(m.keywords, ["add"], "single-word name needs no split");
         for want in [CODE_TAG, "rust", "function", "src/a.rs"] {
             assert!(
                 m.tags.iter().any(|t| t == want),
@@ -326,6 +402,46 @@ mod tests {
                 m.tags
             );
         }
+    }
+
+    #[test]
+    fn multiword_identifiers_are_searchable_by_their_words() {
+        let f = parse("src/a.rs", "pub struct HybridRetriever { a: u8 }\n");
+        let plan = plan_for(&[f]);
+        let m = memories(&plan)[0];
+
+        // The exact name must survive — an agent that knows the symbol should
+        // still find it by typing it verbatim.
+        assert!(m.keywords.contains(&"HybridRetriever".to_string()));
+        // …and the words a human would actually search for.
+        assert!(m.keywords.contains(&"hybrid".to_string()));
+        assert!(m.keywords.contains(&"retriever".to_string()));
+    }
+
+    #[test]
+    fn identifier_words_splits_the_cases_that_occur_in_real_code() {
+        assert_eq!(identifier_words("HybridRetriever"), ["hybrid", "retriever"]);
+        assert_eq!(identifier_words("parse_config"), ["parse", "config"]);
+        assert_eq!(
+            identifier_words("relevant_subtree"),
+            ["relevant", "subtree"]
+        );
+        // Acronym run: the trailing capital starts the next word.
+        assert_eq!(identifier_words("HTTPClient"), ["http", "client"]);
+        // A single word adds nothing the bare name doesn't already give.
+        assert!(identifier_words("add").is_empty());
+        assert!(identifier_words("Memory").is_empty());
+    }
+
+    #[test]
+    fn trailing_digits_stay_glued_to_their_word() {
+        // Regression: splitting alpha→digit produced ["bm", "25", "view"], so
+        // the query token "bm25" matched nothing and `Bm25View` was
+        // unretrievable by the name everyone calls it.
+        assert_eq!(identifier_words("Bm25View"), ["bm25", "view"]);
+        assert_eq!(identifier_words("utf8_decode"), ["utf8", "decode"]);
+        // digit→upper is still a boundary.
+        assert_eq!(identifier_words("v2Config"), ["v2", "config"]);
     }
 
     #[test]

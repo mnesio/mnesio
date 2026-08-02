@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
         Command::Run(opts) => cmd_run(opts).await,
         Command::Compare(opts) => cmd_compare(opts).await,
         Command::MemEval(opts) => cmd_memeval(opts).await,
+        Command::CodeEval(opts) => cmd_codeeval(opts).await,
         Command::Scale(opts) => cmd_scale(opts).await,
         Command::Compete(opts) => cmd_compete(opts).await,
         Command::QaEval(opts) => cmd_qaeval(opts).await,
@@ -1135,6 +1136,7 @@ enum Command {
     Run(RunOpts),
     Compare(CompareOpts),
     MemEval(MemEvalOpts),
+    CodeEval(CodeEvalOpts),
     Scale(ScaleOpts),
     Compete(CompeteOpts),
     QaEval(QaEvalOpts),
@@ -1268,6 +1270,10 @@ fn parse_args() -> Result<RootArgs> {
             iter.next();
             "memeval"
         }
+        Some("codeeval") => {
+            iter.next();
+            "codeeval"
+        }
         Some("scale") => {
             iter.next();
             "scale"
@@ -1307,6 +1313,9 @@ fn parse_args() -> Result<RootArgs> {
         }),
         "compare" => Ok(RootArgs {
             command: Command::Compare(parse_compare(iter)?),
+        }),
+        "codeeval" => Ok(RootArgs {
+            command: Command::CodeEval(parse_codeeval(iter)?),
         }),
         "memeval" => Ok(RootArgs {
             command: Command::MemEval(parse_memeval(iter)?),
@@ -1369,7 +1378,12 @@ fn parse_fetch(mut iter: std::iter::Peekable<impl Iterator<Item = String>>) -> R
         match arg.as_str() {
             "--dataset" => opts.dataset = next_value(&mut iter, "--dataset")?,
             "--rows" => opts.rows = next_value(&mut iter, "--rows")?.parse()?,
-            "--k" => opts.k = next_value(&mut iter, "--k")?.parse()?,
+            "--k" => {
+                opts.ks = next_value(&mut iter, "--k")?
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
             "--embedder" => opts.embedder = next_value(&mut iter, "--embedder")?,
             "--force" => opts.force = true,
             "--fetch-only" => opts.fetch_only = true,
@@ -1479,6 +1493,57 @@ fn parse_qaeval(mut iter: std::iter::Peekable<impl Iterator<Item = String>>) -> 
         }
     }
     Ok(opts)
+}
+
+/// Options for the Phase 17B code-retrieval measurement.
+struct CodeEvalOpts {
+    /// Directory of source to index.
+    dir: String,
+    /// Sweep of top-k values, all measured on one index.
+    ks: Vec<usize>,
+    embedder: String,
+}
+
+fn parse_codeeval(
+    mut iter: std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<CodeEvalOpts> {
+    let mut opts = CodeEvalOpts {
+        dir: "crates/mnesio-index/src".into(),
+        ks: vec![1, 3, 5, 10],
+        embedder: "mock".into(),
+    };
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--dir" => opts.dir = next_value(&mut iter, "--dir")?,
+            "--k" => {
+                opts.ks = next_value(&mut iter, "--k")?
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            "--embedder" => opts.embedder = next_value(&mut iter, "--embedder")?,
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => bail!("unknown argument {other:?}; pass --help for usage"),
+        }
+    }
+    Ok(opts)
+}
+
+async fn cmd_codeeval(opts: CodeEvalOpts) -> Result<()> {
+    use mnesio_bench::codeeval::{format_report, run_codeeval, INDEX_CRATE_SUITE};
+    eprintln!(
+        "# mnesio-bench codeeval · dir={} · k={:?} · embedder={} · {} queries",
+        opts.dir,
+        opts.ks,
+        opts.embedder,
+        INDEX_CRATE_SUITE.len()
+    );
+    let report = run_codeeval(&opts.dir, &opts.ks, &opts.embedder, INDEX_CRATE_SUITE).await?;
+    println!("{}", format_report(&report));
+    Ok(())
 }
 
 fn parse_memeval(
@@ -1638,6 +1703,8 @@ fn print_help() {
          \x20\x20             (default — invoked when no subcommand is given)\n\
          \x20\x20compare    A vs B evaluation of two artifact bodies against a fixed suite\n\
          \x20\x20memeval    memory recall@k over the real ingest→retrieve path\n\
+         \x20\x20codeeval   Phase-17B code retrieval: whole-file vs. symbol vs. symbol+\n\
+         \x20\x20             graph-expansion, paired on one index (recall + token cost)\n\
          \x20\x20scale      large-scale load test: throughput + latency percentiles + recall\n\
          \x20\x20             over a deterministic synthetic corpus (1k–100k+)\n\
          \x20\x20compete    competitive comparison: mnesio's measured recall + capability\n\
@@ -1674,6 +1741,11 @@ fn print_help() {
          \x20\x20--k              top-k retrieved as context       (default: 10)\n\
          \x20\x20--embedder       mock | fastembed                 (default: mock)\n\
          \x20\x20--llm            demo | ollama | openrouter       (default: demo)\n\
+         \n\
+         CODEEVAL OPTIONS:\n\
+         \x20\x20--dir            source dir to index   (default: crates/mnesio-index/src)\n\
+         \x20\x20--k              comma-separated top-k sweep          (default: 1,3,5,10)\n\
+         \x20\x20--embedder       mock | fastembed                         (default: mock)\n\
          \n\
          MEMEVAL OPTIONS:\n\
          \x20\x20--suite          locomo | longmemeval             (default: locomo)\n\

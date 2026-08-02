@@ -133,7 +133,9 @@ pub fn load_memeval_suite(json: &str) -> Result<MemEvalSuite> {
     Ok(suite)
 }
 
-fn build_embedder(choice: &str) -> Result<Arc<dyn Embedder>> {
+/// Resolve an embedder by name — shared by every harness so `--embedder` means
+/// the same thing everywhere (`mock` offline, `fastembed` real semantics).
+pub fn build_embedder(choice: &str) -> Result<Arc<dyn Embedder>> {
     match choice {
         "mock" => Ok(Arc::new(MockEmbedder::new(MOCK_DIM))),
         "fastembed" => Ok(Arc::new(
