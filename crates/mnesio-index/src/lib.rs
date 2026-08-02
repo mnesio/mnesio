@@ -178,6 +178,18 @@ impl HybridRetriever {
     }
 
     /// Install a final reranker stage (default: identity).
+    /// Set how many candidates each view contributes before fusion.
+    ///
+    /// The default 4 is tuned for prose. Code retrieval wants more: a Phase-17B
+    /// miss taxonomy over 400 real repository tasks found 29% of queries had
+    /// their gold symbol present in a 400-deep candidate list but ranked below
+    /// `k` — signal a reranker can only use if the pool is deep enough to
+    /// contain it. Costs a linear amount of scoring work per query.
+    pub fn with_over_fetch(mut self, factor: usize) -> Self {
+        self.over_fetch = factor.max(1);
+        self
+    }
+
     pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
         self.reranker = reranker;
         self

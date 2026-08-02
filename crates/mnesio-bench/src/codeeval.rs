@@ -47,7 +47,7 @@ use mnesio_core::event::{Event, LogEntry};
 use mnesio_core::traits::MaterializedView;
 use mnesio_core::types::{new_id, MemoryRef, Scope};
 use mnesio_core::{Query, Retriever};
-use mnesio_index::{Bm25View, HybridRetriever, VectorView};
+use mnesio_index::{Bm25View, HybridRetriever, LexicalReranker, VectorView};
 use std::sync::Arc;
 
 use crate::memeval::build_embedder;
@@ -72,6 +72,18 @@ pub struct Gold {
     pub name: String,
 }
 
+impl Gold {
+    /// Does the symbol defined at `path` under `name` satisfy this gold entry?
+    pub fn matches(&self, path: &str, name: &str) -> bool {
+        // `map_or(true, ..)` rather than `is_none_or`: the latter is stable
+        // only since 1.82 and the workspace MSRV is 1.79.
+        #[allow(clippy::unnecessary_map_or)]
+        {
+            self.name == name && self.path.as_ref().map_or(true, |p| p == path)
+        }
+    }
+}
+
 /// One task and the symbols that answer it.
 pub struct CodeQuery {
     pub question: String,
@@ -82,11 +94,9 @@ pub struct CodeQuery {
 
 impl CodeQuery {
     fn hit(&self, retrieved: &[&SymbolInfo]) -> bool {
-        retrieved.iter().any(|s| {
-            self.gold
-                .iter()
-                .any(|g| g.name == s.name && g.path.as_ref().map_or(true, |p| *p == s.path))
-        })
+        retrieved
+            .iter()
+            .any(|s| self.gold.iter().any(|g| g.matches(&s.path, &s.name)))
     }
 }
 
@@ -206,6 +216,68 @@ impl BudgetResult {
     }
 }
 
+/// One seed-ranking configuration.
+#[derive(Debug, Clone)]
+pub struct SeedResult {
+    /// Candidates each view contributes before fusion.
+    pub over_fetch: usize,
+    pub reranked: bool,
+    pub k: usize,
+    pub recalled: usize,
+    pub total: usize,
+}
+
+impl SeedResult {
+    pub fn recall(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.recalled as f32 / self.total as f32
+        }
+    }
+}
+
+/// Where a query's recall was lost.
+///
+/// The point of splitting misses up: "56% recall" is not actionable, but
+/// "of the 44% missed, X are rankable and Y are unreachable" says exactly
+/// which half of the pipeline to work on — and caps how much any amount of
+/// reranking could ever buy.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MissTaxonomy {
+    /// Gold symbol was in the packed context at the evaluated `k`.
+    pub hit: usize,
+    /// Gold symbol was *retrievable* — it appeared in a very deep candidate
+    /// list — but ranked below `k`. This is the reranking-addressable share,
+    /// and the ceiling on what any better ranker can win.
+    pub rankable: usize,
+    /// Gold symbol never surfaced even at the deep `k`, but the query does
+    /// share vocabulary with it. Retrievable in principle; the signal is being
+    /// drowned by the rest of the corpus.
+    pub drowned: usize,
+    /// Query and gold symbol share no indexed term at all. No amount of
+    /// reranking reaches this — it needs a different signal (better
+    /// embeddings, or code the query's words actually appear in).
+    pub no_overlap: usize,
+    /// Gold symbol is not in the index at all — the commit touched something
+    /// the parser did not extract. Not a retrieval failure; a parsing ceiling.
+    pub not_indexed: usize,
+}
+
+impl MissTaxonomy {
+    pub fn total(&self) -> usize {
+        self.hit + self.rankable + self.drowned + self.no_overlap + self.not_indexed
+    }
+    /// Best recall achievable at `k` if ranking were perfect — everything
+    /// except what the index cannot reach at all.
+    pub fn rankable_ceiling(&self) -> f32 {
+        if self.total() == 0 {
+            return 0.0;
+        }
+        (self.hit + self.rankable + self.drowned) as f32 / self.total() as f32
+    }
+}
+
 /// Full run output.
 #[derive(Debug, Clone)]
 pub struct CodeEvalReport {
@@ -222,6 +294,15 @@ pub struct CodeEvalReport {
     /// Packing-policy ablation at fixed budgets. Every policy sees the *same*
     /// seed list, so a difference is the assembly policy and nothing else.
     pub packing: Vec<BudgetResult>,
+    /// Seed-ranking 2x2: candidate-pool depth crossed with the reranker.
+    /// Every cell runs on the same index and the same queries.
+    pub seeding: Vec<SeedResult>,
+    /// Where recall was lost, at the evaluated `k` and against a deep probe.
+    pub misses: MissTaxonomy,
+    /// The `k` [`MissTaxonomy::rankable`] was judged against.
+    pub miss_k: usize,
+    /// Depth of the probe used to decide "retrievable at all".
+    pub probe_k: usize,
 }
 
 impl CodeEvalReport {
@@ -283,6 +364,29 @@ struct SymbolInfo {
     text: String,
     signature: Option<String>,
     kind: SymbolKind,
+}
+
+/// Do the query and a symbol's text share any content word?
+///
+/// Deliberately crude — lowercase alphanumeric runs of 3+ characters, minus a
+/// few words every commit subject contains. It is not trying to model the
+/// index's analyzer; it only has to separate "the words are in there somewhere"
+/// from "there is nothing lexical to match on", which is the distinction that
+/// decides whether better scoring could ever help.
+fn shares_vocabulary(query: &str, text: &str) -> bool {
+    const NOISE: &[&str] = &[
+        "the", "and", "for", "with", "add", "fix", "use", "new", "not", "from", "into", "when",
+        "that", "this", "make", "update", "remove", "support",
+    ];
+    let words = |s: &str| -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(str::to_lowercase)
+            .filter(|w| !NOISE.contains(&w.as_str()))
+            .collect()
+    };
+    let hay = words(text);
+    words(query).iter().any(|w| hay.contains(w))
 }
 
 /// The bench's [`PackSource`]: the in-memory side tables an index run already
@@ -550,7 +654,7 @@ pub async fn run_codeeval(
         }
     }
 
-    let retriever = HybridRetriever::new(vector, bm25, embedder.clone());
+    let retriever = HybridRetriever::new(vector.clone(), bm25.clone(), embedder.clone());
     let source = BenchSource {
         symbols: &symbols,
         links: &links,
@@ -727,11 +831,108 @@ pub async fn run_codeeval(
         packing.extend(rows);
     }
 
+    // --- seed ranking: does a deeper pool, or reranking it, convert the
+    // `rankable` share into hits? Paired on this one index. ---
+    let seed_eval_k = ks.iter().copied().max().unwrap_or(20);
+    let mut seeding: Vec<SeedResult> = Vec::new();
+    for over_fetch in [4usize, 20] {
+        for reranked in [false, true] {
+            let mut r = HybridRetriever::new(vector.clone(), bm25.clone(), embedder.clone())
+                .with_over_fetch(over_fetch);
+            if reranked {
+                r = r.with_reranker(Arc::new(LexicalReranker::new(bm25.clone())));
+            }
+            let mut row = SeedResult {
+                over_fetch,
+                reranked,
+                k: seed_eval_k,
+                recalled: 0,
+                total: 0,
+            };
+            for q in suite {
+                let hits = r
+                    .search(&Query {
+                        text: q.question.to_string(),
+                        scope: scope.clone(),
+                        k: seed_eval_k,
+                        time_filter: None,
+                    })
+                    .await
+                    .map_err(|e| anyhow!("search: {e}"))?;
+                let got: Vec<&SymbolInfo> =
+                    hits.iter().filter_map(|h| symbols.get(&h.memory)).collect();
+                row.total += 1;
+                if q.hit(&got) {
+                    row.recalled += 1;
+                }
+            }
+            seeding.push(row);
+        }
+    }
+
+    // --- where is recall actually lost? ---
+    //
+    // Run each query twice: once at the reporting `k`, once at a much deeper
+    // `probe_k`. A gold symbol that shows up in the deep list but not the
+    // shallow one is a *ranking* failure and is what a better ranker could
+    // win. One that never shows up at all is not — and the split between
+    // "shares vocabulary with the query" and "shares nothing" says whether
+    // that is a scoring problem or a representation problem.
+    let miss_k = ks.iter().copied().max().unwrap_or(20);
+    let probe_k = (miss_k * 20).max(200);
+    let mut misses = MissTaxonomy::default();
+
+    for q in suite {
+        // A gold name the parser never extracted can't be retrieved by anyone.
+        let indexed: Vec<&SymbolInfo> = symbols
+            .values()
+            .filter(|s| q.gold.iter().any(|g| g.matches(&s.path, &s.name)))
+            .collect();
+        if indexed.is_empty() {
+            misses.not_indexed += 1;
+            continue;
+        }
+
+        let deep = retriever
+            .search(&Query {
+                text: q.question.to_string(),
+                scope: scope.clone(),
+                k: probe_k,
+                time_filter: None,
+            })
+            .await
+            .map_err(|e| anyhow!("search: {e}"))?;
+
+        let at = |n: usize| -> Vec<&SymbolInfo> {
+            deep.iter()
+                .take(n)
+                .filter_map(|h| symbols.get(&h.memory))
+                .collect()
+        };
+
+        if q.hit(&at(miss_k)) {
+            misses.hit += 1;
+        } else if q.hit(&at(probe_k)) {
+            misses.rankable += 1;
+        } else if indexed
+            .iter()
+            .any(|s| shares_vocabulary(&q.question, &s.text))
+        {
+            misses.drowned += 1;
+        } else {
+            misses.no_overlap += 1;
+        }
+    }
+
     Ok(CodeEvalReport {
         embedder: embedder_choice.to_string(),
         index: plan.stats,
         arms,
         packing,
+        seeding,
+        misses,
+        miss_k,
+        probe_k,
     })
 }
 
@@ -827,6 +1028,57 @@ pub fn format_report(r: &CodeEvalReport) -> String {
             cell("whole-file"),
             cell("symbol"),
             cell("symbol+expand"),
+        ));
+    }
+
+    // Seed ranking: the 2x2 the miss taxonomy motivates.
+    if !r.seeding.is_empty() {
+        let k = r.seeding[0].k;
+        out.push_str(&format!(
+            "\n## seed ranking (k={k})\n\n\
+             | over-fetch | reranker | recall |\n|---|---|---|\n"
+        ));
+        for s in &r.seeding {
+            out.push_str(&format!(
+                "| {}x | {} | {:.0}% ({}/{}) |\n",
+                s.over_fetch,
+                if s.reranked { "lexical" } else { "off" },
+                s.recall() * 100.0,
+                s.recalled,
+                s.total
+            ));
+        }
+    }
+
+    // Where recall is lost — the number that says what to work on next.
+    let m = &r.misses;
+    if m.total() > 0 {
+        let pct = |n: usize| n as f32 * 100.0 / m.total() as f32;
+        out.push_str(&format!(
+            "\n## where recall is lost (k={}, probe depth {})\n\n\
+             | outcome | queries | share | fixable by |\n|---|---|---|---|\n\
+             | hit | {} | {:.0}% | — |\n\
+             | rankable | {} | {:.0}% | **a better ranker** |\n\
+             | drowned | {} | {:.0}% | scoring — terms match but rank below {} |\n\
+             | no overlap | {} | {:.0}% | not ranking — needs a different signal |\n\
+             | not indexed | {} | {:.0}% | the parser, not retrieval |\n\n\
+             **Ceiling on reranking: {:.0}%.** Everything above that is out of \
+             reach of any scoring change — the gold symbol either shares no \
+             vocabulary with the task or was never extracted.\n",
+            r.miss_k,
+            r.probe_k,
+            m.hit,
+            pct(m.hit),
+            m.rankable,
+            pct(m.rankable),
+            m.drowned,
+            pct(m.drowned),
+            r.probe_k,
+            m.no_overlap,
+            pct(m.no_overlap),
+            m.not_indexed,
+            pct(m.not_indexed),
+            m.rankable_ceiling() * 100.0,
         ));
     }
 
