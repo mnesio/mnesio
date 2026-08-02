@@ -1,5 +1,7 @@
 //! Real grammars: [`TreeSitterParser`], behind the `tree-sitter` feature.
 //!
+//! 22 languages, every one verified by a test that extracts a real symbol.
+//!
 //! ## One mechanism, every language
 //!
 //! Every tree-sitter grammar ships a `tags.scm` query upstream, and those
@@ -52,10 +54,22 @@ struct Grammar {
 /// roughly the order in which a missing one would be noticed.
 ///
 /// **A language is listed only if its grammar crate exports a usable
-/// `TAGS_QUERY`.** Scala and shell were dropped for exactly that reason —
-/// `tree-sitter-scala` ships `tags.scm` but does not export it, and
-/// `tree-sitter-bash` has none. Listing them would have advertised languages
-/// that silently index zero symbols, which is worse than not claiming them.
+/// `TAGS_QUERY` const.** That constraint, not availability, is what caps this
+/// list. Of 46 grammar crates that resolve against tree-sitter 0.25, only 20
+/// export the query — the rest ship `queries/tags.scm` as a *file* the crate
+/// never compiles in (scala, svelte), or have no tags query at all (bash,
+/// kotlin, zig, haskell, julia, hcl, css, html, yaml, toml, make, objc,
+/// clojure, verilog).
+///
+/// This is a Rust-packaging difference, not a tree-sitter one: a Node consumer
+/// reads `node_modules/<grammar>/queries/tags.scm` off disk at runtime, so it
+/// gets every grammar's query for free. Reaching those languages here means
+/// vendoring the upstream `.scm` files into this repo with their licences, or
+/// writing our own queries against each grammar's node types — both real work,
+/// neither done yet.
+///
+/// Listing a language we cannot extract from would advertise one that silently
+/// indexes zero symbols, which is worse than not claiming it.
 static GRAMMARS: &[Grammar] = &[
     Grammar {
         name: "rust",
@@ -128,6 +142,66 @@ static GRAMMARS: &[Grammar] = &[
         extensions: &["php"],
         language: || tree_sitter_php::LANGUAGE_PHP.into(),
         tags: tree_sitter_php::TAGS_QUERY,
+    },
+    Grammar {
+        name: "swift",
+        extensions: &["swift"],
+        language: || tree_sitter_swift::LANGUAGE.into(),
+        tags: tree_sitter_swift::TAGS_QUERY,
+    },
+    Grammar {
+        name: "lua",
+        extensions: &["lua"],
+        language: || tree_sitter_lua::LANGUAGE.into(),
+        tags: tree_sitter_lua::TAGS_QUERY,
+    },
+    Grammar {
+        name: "elixir",
+        extensions: &["ex", "exs"],
+        language: || tree_sitter_elixir::LANGUAGE.into(),
+        tags: tree_sitter_elixir::TAGS_QUERY,
+    },
+    Grammar {
+        name: "ocaml",
+        extensions: &["ml"],
+        language: || tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+        tags: tree_sitter_ocaml::TAGS_QUERY,
+    },
+    Grammar {
+        name: "ocaml_interface",
+        extensions: &["mli"],
+        language: || tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into(),
+        tags: tree_sitter_ocaml::TAGS_QUERY,
+    },
+    Grammar {
+        name: "ocaml_type",
+        extensions: &["mlt"],
+        language: || tree_sitter_ocaml::LANGUAGE_OCAML_TYPE.into(),
+        tags: tree_sitter_ocaml::TAGS_QUERY,
+    },
+    Grammar {
+        name: "r",
+        extensions: &["r", "R"],
+        language: || tree_sitter_r::LANGUAGE.into(),
+        tags: tree_sitter_r::TAGS_QUERY,
+    },
+    Grammar {
+        name: "dart",
+        extensions: &["dart"],
+        language: || tree_sitter_dart::LANGUAGE.into(),
+        tags: tree_sitter_dart::TAGS_QUERY,
+    },
+    Grammar {
+        name: "solidity",
+        extensions: &["sol"],
+        language: || tree_sitter_solidity::LANGUAGE.into(),
+        tags: tree_sitter_solidity::TAGS_QUERY,
+    },
+    Grammar {
+        name: "elm",
+        extensions: &["elm"],
+        language: || tree_sitter_elm::LANGUAGE.into(),
+        tags: tree_sitter_elm::TAGS_QUERY,
     },
 ];
 
