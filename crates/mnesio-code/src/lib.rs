@@ -28,16 +28,21 @@
 //! - [`Symbol`] / [`SymbolKind`] — a definition extracted from a file.
 //! - [`CodeEdge`] / [`EdgeKind`] — an *unresolved* relationship between symbols.
 //! - [`CodeParser`] — the swappable parsing seam (Hard Rule #7).
+//! - [`CodeMemory`] — **the entry point.** Index a repo, then ask it for the
+//!   code a task needs, fitted to a token budget. Everything below is a stage
+//!   it assembles with settings that were measured rather than chosen.
 //! - [`pack`] — fit retrieval's ranked output into a token budget, which is
 //!   the constraint an agent actually has.
 //! - [`HeuristicParser`] — dependency-free line/brace scanning; what the tests
 //!   run on. Real grammars land behind the `tree-sitter` feature.
 
 pub mod index;
+pub mod memory;
 pub mod pack;
 pub mod parse;
 
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
+pub use memory::{CodeContext, CodeHit, CodeMemory};
 pub use pack::{pack, Form, PackConfig, PackSource, PackedContext, PackedSymbol, Reason};
 pub use parse::{CodeParser, HeuristicParser, ParseError};
 

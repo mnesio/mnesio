@@ -22,7 +22,13 @@ tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust"]
 
 [dependencies]
 mnesio-core.workspace = true
+# `CodeMemory` assembles retrieval, so it needs the index views. Acyclic:
+# mnesio-index depends only on mnesio-core.
+mnesio-index.workspace = true
 serde = { workspace = true, features = ["derive"] }
 tracing.workspace = true
 tree-sitter = { version = "0.24", optional = true }
 tree-sitter-rust = { version = "0.23", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
