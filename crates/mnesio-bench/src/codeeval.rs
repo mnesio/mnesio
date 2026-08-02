@@ -47,7 +47,7 @@ use mnesio_core::event::{Event, LogEntry};
 use mnesio_core::traits::MaterializedView;
 use mnesio_core::types::{new_id, MemoryRef, Scope};
 use mnesio_core::{Query, Retriever};
-use mnesio_index::{Bm25View, HybridRetriever, LexicalReranker, VectorView};
+use mnesio_index::{Bm25View, HybridRetriever, LexicalReranker, VectorView, CODE_BOOST};
 use std::sync::Arc;
 
 use crate::memeval::build_embedder;
@@ -221,7 +221,14 @@ impl BudgetResult {
 pub struct SeedResult {
     /// Candidates each view contributes before fusion.
     pub over_fetch: usize,
-    pub reranked: bool,
+    /// Reranker bonus scale; `None` means the stage is off entirely.
+    ///
+    /// Swept because the Phase-16 blend is a *bounded* additive bonus on the
+    /// normalised base score — a deliberate safety property that stops content
+    /// relevance evicting a decisively stronger retrieval signal. On code that
+    /// same bound is the suspected cap on how far a gold symbol can be
+    /// promoted, so the size of the bound is the thing to measure.
+    pub boost: Option<f32>,
     pub k: usize,
     pub recalled: usize,
     pub total: usize,
@@ -835,16 +842,23 @@ pub async fn run_codeeval(
     // `rankable` share into hits? Paired on this one index. ---
     let seed_eval_k = ks.iter().copied().max().unwrap_or(20);
     let mut seeding: Vec<SeedResult> = Vec::new();
-    for over_fetch in [4usize, 20] {
-        for reranked in [false, true] {
+    // `over_fetch` is fixed at 4: a paired 4x-vs-20x run on this same suite
+    // moved recall by at most 1pp, so pool depth is not the constraint and
+    // sweeping it again would only burn time.
+    // Deliberately swept past any sane setting. If recall never turns over,
+    // the retrieval base score contributes nothing on code and the blend
+    // itself is wrong — a far more important finding than a tuned constant.
+    for boost in [None, Some(0.5f32), Some(CODE_BOOST), Some(12.0)] {
+        {
+            let over_fetch = 4usize;
             let mut r = HybridRetriever::new(vector.clone(), bm25.clone(), embedder.clone())
                 .with_over_fetch(over_fetch);
-            if reranked {
-                r = r.with_reranker(Arc::new(LexicalReranker::new(bm25.clone())));
+            if let Some(b) = boost {
+                r = r.with_reranker(Arc::new(LexicalReranker::new(bm25.clone()).with_boost(b)));
             }
             let mut row = SeedResult {
                 over_fetch,
-                reranked,
+                boost,
                 k: seed_eval_k,
                 recalled: 0,
                 total: 0,
@@ -1036,13 +1050,16 @@ pub fn format_report(r: &CodeEvalReport) -> String {
         let k = r.seeding[0].k;
         out.push_str(&format!(
             "\n## seed ranking (k={k})\n\n\
-             | over-fetch | reranker | recall |\n|---|---|---|\n"
+             | over-fetch | reranker boost | recall |\n|---|---|---|\n"
         ));
         for s in &r.seeding {
             out.push_str(&format!(
                 "| {}x | {} | {:.0}% ({}/{}) |\n",
                 s.over_fetch,
-                if s.reranked { "lexical" } else { "off" },
+                match s.boost {
+                    None => "off".to_string(),
+                    Some(b) => format!("{b:.1}"),
+                },
                 s.recall() * 100.0,
                 s.recalled,
                 s.total

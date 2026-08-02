@@ -58,6 +58,34 @@ const W_UPDATE: f32 = 0.3;
 /// hit with a decisively higher retrieval signal (protects `recall@k`).
 const DEFAULT_BOOST: f32 = 0.5;
 
+/// Bonus scale for **code** retrieval. Six times the prose default.
+///
+/// Measured, not guessed: `mnesio-bench codeeval` over llama-index-core with
+/// 400 git-derived tasks (query = a real commit subject, gold = the symbols
+/// that commit touched), recall@20, one index, boost swept inside the run —
+///
+/// | boost | 0.0 | 0.5 | 1.5 | 3.0 | 6.0 | 12.0 | 48.0 |
+/// |---|---|---|---|---|---|---|---|
+/// | recall | 52% | 56% | 61% | **62%** | 62% | 61% | 61% |
+///
+/// The prose default of 0.5 exists to stop content relevance evicting a
+/// decisively stronger retrieval signal, a guard added after the Phase-16
+/// reranker regressed prose recall. On code that guard is the binding
+/// constraint: an identifier-coverage match is a far more reliable signal than
+/// the temporal and update cues prose leans on, so the bonus can be much
+/// larger before it does harm.
+///
+/// The sweep was deliberately run past any sane value. It turns *over* rather
+/// than climbing, which is the reassuring shape — but only just: 48.0 still
+/// scores 61%. Read honestly, that says the retrieval base score is worth
+/// about 1pp here and the lexical features are doing nearly all the ranking.
+/// Hybrid retrieval is functioning mostly as a candidate generator for code.
+pub const CODE_BOOST: f32 = 3.0;
+
+/// The code boost is deliberately the larger of the two. Enforced at compile
+/// time so the relationship cannot be inverted by an edit to either constant.
+const _: () = assert!(CODE_BOOST > DEFAULT_BOOST);
+
 /// Content-aware reranker. Wire it with [`crate::HybridRetriever::with_reranker`].
 pub struct LexicalReranker {
     content: Arc<dyn ContentProvider>,
@@ -70,6 +98,18 @@ impl LexicalReranker {
         Self {
             content,
             boost: DEFAULT_BOOST,
+        }
+    }
+
+    /// Reranker tuned for **code** retrieval — see [`CODE_BOOST`] for the
+    /// measurement behind the value.
+    ///
+    /// A separate constructor rather than a changed default: the prose default
+    /// is load-bearing for LOCOMO/LongMemEval and must not move.
+    pub fn for_code(content: Arc<dyn ContentProvider>) -> Self {
+        Self {
+            content,
+            boost: CODE_BOOST,
         }
     }
 
@@ -538,6 +578,24 @@ mod tests {
             .unwrap();
         assert_eq!(hits[0].memory, a);
         assert_eq!(hits.len(), 2, "no candidate is dropped");
+    }
+
+    #[test]
+    fn the_code_boost_is_separate_from_the_prose_default() {
+        // The prose default is load-bearing for LOCOMO/LongMemEval — Phase 16
+        // measured real regressions when content relevance was allowed to
+        // outrank retrieval there. `for_code` must therefore be a *separate*
+        // constructor, never a changed default, or a code-retrieval win would
+        // silently move the published prose numbers.
+        // Exact values, because these are the measured settings — a drift in
+        // either is a silent change to published numbers. Their *ordering* is
+        // enforced separately at compile time.
+        assert_eq!(DEFAULT_BOOST, 0.5, "prose default must not drift");
+        assert_eq!(CODE_BOOST, 3.0, "code boost must not drift");
+        assert_eq!(
+            LexicalReranker::for_code(Arc::new(MapContent(HashMap::new()))).boost,
+            CODE_BOOST
+        );
     }
 
     #[tokio::test]

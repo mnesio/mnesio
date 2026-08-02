@@ -30,7 +30,7 @@ pub use embedder::FastEmbedEmbedder;
 pub use embedder::MockEmbedder;
 pub use partitioned_vector::{TenantPartitionedVectorView, TenantStats};
 pub use profile::{AttributeState, ProfileValue, ProfileView};
-pub use rerank::LexicalReranker;
+pub use rerank::{LexicalReranker, CODE_BOOST};
 pub use synthesizer::SnippetSynthesizer;
 pub use vector::VectorView;
 
