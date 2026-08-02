@@ -41,7 +41,8 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-use mnesio_code::{CodeIndexer, CodeParser, HeuristicParser, IndexStats, ParsedFile};
+use mnesio_code::pack::{pack, Form, PackConfig, PackSource};
+use mnesio_code::{CodeIndexer, CodeParser, HeuristicParser, IndexStats, ParsedFile, SymbolKind};
 use mnesio_core::event::{Event, LogEntry};
 use mnesio_core::traits::MaterializedView;
 use mnesio_core::types::{new_id, MemoryRef, Scope};
@@ -157,6 +158,54 @@ impl ArmResult {
     }
 }
 
+/// One packing policy at one fixed budget.
+///
+/// Separate from [`ArmResult`] because the question is different: the arms ask
+/// "how much does top-`k` cost?", this asks "given a fixed budget, which
+/// assembly policy makes the best use of it?" — the decision the packer exists
+/// to make.
+#[derive(Debug, Clone)]
+pub struct BudgetResult {
+    pub policy: &'static str,
+    pub budget: usize,
+    /// Gold symbol present in *any* form, including signature-only.
+    pub recalled: usize,
+    /// Gold symbol present with its **full body**.
+    ///
+    /// Reported next to `recalled` because the two answer different questions,
+    /// and conflating them would overstate the signature ladder: a declaration
+    /// tells an agent a symbol exists and what it takes — enough to decide what
+    /// to ask for next, *not* enough to edit it.
+    pub recalled_full: usize,
+    pub total: usize,
+    pub tokens: usize,
+}
+
+impl BudgetResult {
+    pub fn recall(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.recalled as f32 / self.total as f32
+        }
+    }
+    /// Recall counting only symbols delivered whole.
+    pub fn recall_full(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.recalled_full as f32 / self.total as f32
+        }
+    }
+    pub fn tokens_per_query(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.tokens as f32 / self.total as f32
+        }
+    }
+}
+
 /// Full run output.
 #[derive(Debug, Clone)]
 pub struct CodeEvalReport {
@@ -170,6 +219,9 @@ pub struct CodeEvalReport {
     /// matches whole-file's recall" is only meaningful if both arms saw an
     /// identical corpus and identical HNSW graph.
     pub arms: Vec<ArmResult>,
+    /// Packing-policy ablation at fixed budgets. Every policy sees the *same*
+    /// seed list, so a difference is the assembly policy and nothing else.
+    pub packing: Vec<BudgetResult>,
 }
 
 impl CodeEvalReport {
@@ -229,6 +281,37 @@ struct SymbolInfo {
     name: String,
     path: String,
     text: String,
+    signature: Option<String>,
+    kind: SymbolKind,
+}
+
+/// The bench's [`PackSource`]: the in-memory side tables an index run already
+/// keeps, exposed in the shape the packer wants.
+struct BenchSource<'a> {
+    symbols: &'a HashMap<MemoryRef, SymbolInfo>,
+    links: &'a HashMap<MemoryRef, Vec<MemoryRef>>,
+    module_docs: &'a HashMap<String, String>,
+}
+
+impl PackSource for BenchSource<'_> {
+    fn text(&self, m: MemoryRef) -> Option<&str> {
+        self.symbols.get(&m).map(|s| s.text.as_str())
+    }
+    fn signature(&self, m: MemoryRef) -> Option<&str> {
+        self.symbols.get(&m).and_then(|s| s.signature.as_deref())
+    }
+    fn path(&self, m: MemoryRef) -> Option<&str> {
+        self.symbols.get(&m).map(|s| s.path.as_str())
+    }
+    fn kind(&self, m: MemoryRef) -> Option<SymbolKind> {
+        self.symbols.get(&m).map(|s| s.kind)
+    }
+    fn module_doc(&self, path: &str) -> Option<&str> {
+        self.module_docs.get(path).map(String::as_str)
+    }
+    fn links(&self, m: MemoryRef) -> &[MemoryRef] {
+        self.links.get(&m).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// Parse `dir` and report every symbol's current location.
@@ -268,9 +351,8 @@ pub fn trace_targets(dir: &str) -> Result<Vec<crate::gitsuite::TraceTarget>> {
     Ok(out)
 }
 
-/// Extension → language tag, for the brace-delimited languages the
-/// `HeuristicParser` handles. Python is deliberately absent: the parser rejects
-/// indentation-based languages rather than producing plausible nonsense.
+/// Extension → language tag, for the languages `HeuristicParser` handles.
+/// Anything else is skipped rather than parsed into plausible nonsense.
 fn language_of(path: &std::path::Path) -> Option<&'static str> {
     match path.extension()?.to_str()? {
         "rs" => Some("rust"),
@@ -385,6 +467,23 @@ pub async fn run_codeeval(
     }
 
     // --- plan -> events, and keep the side tables scoring needs ---
+    // The emitted `Memory` carries the code but not the signature or kind, so
+    // those are looked up from the parse output the packer's degradation ladder
+    // needs them.
+    let mut decl: HashMap<(String, String), (Option<String>, SymbolKind)> = HashMap::new();
+    let mut module_docs: HashMap<String, String> = HashMap::new();
+    for f in &parsed {
+        if let Some(d) = &f.module_doc {
+            module_docs.insert(f.path.clone(), d.clone());
+        }
+        for s in &f.symbols {
+            decl.insert(
+                (s.path.clone(), s.name.clone()),
+                (s.signature.clone(), s.kind),
+            );
+        }
+    }
+
     let plan = CodeIndexer::new(scope.clone()).plan(&parsed);
     let mut symbols: HashMap<MemoryRef, SymbolInfo> = HashMap::new();
     let mut links: HashMap<MemoryRef, Vec<MemoryRef>> = HashMap::new();
@@ -416,12 +515,19 @@ pub async fn run_codeeval(
                     .find(|t| file_text.contains_key(*t))
                     .cloned()
                     .unwrap_or_default();
+                let name = m.keywords.first().cloned().unwrap_or_default();
+                let (signature, kind) = decl
+                    .get(&(path.clone(), name.clone()))
+                    .cloned()
+                    .unwrap_or((None, SymbolKind::Function));
                 symbols.insert(
                     MemoryRef(m.id),
                     SymbolInfo {
-                        name: m.keywords.first().cloned().unwrap_or_default(),
+                        name,
                         path,
                         text: m.content.clone(),
+                        signature,
+                        kind,
                     },
                 );
 
@@ -445,6 +551,11 @@ pub async fn run_codeeval(
     }
 
     let retriever = HybridRetriever::new(vector, bm25, embedder.clone());
+    let source = BenchSource {
+        symbols: &symbols,
+        links: &links,
+        module_docs: &module_docs,
+    };
 
     // --- run the arms, all against this one index ---
     let mut arms: Vec<ArmResult> = Vec::with_capacity(ks.len() * 3);
@@ -532,10 +643,95 @@ pub async fn run_codeeval(
         arms.extend([whole_file, symbol_only, expanded]);
     }
 
+    // --- packing ablation at fixed budgets ---
+    //
+    // Seeds come from a single generous `k` so every policy chooses from the
+    // same candidate pool; what differs is only how the budget is spent. The
+    // policies are cumulative, so each row shows what one idea added.
+    let seed_k = ks.iter().copied().max().unwrap_or(10);
+    let mut packing: Vec<BudgetResult> = Vec::new();
+    for budget in [2_000usize, 4_000, 8_000, 16_000] {
+        let policies: [(&'static str, PackConfig); 4] = [
+            ("truncate", PackConfig::naive(budget)),
+            (
+                "+signature",
+                PackConfig {
+                    degrade: true,
+                    ..PackConfig::naive(budget)
+                },
+            ),
+            (
+                "+expand",
+                PackConfig {
+                    degrade: true,
+                    expand: true,
+                    max_expansions_per_seed: 3,
+                    ..PackConfig::naive(budget)
+                },
+            ),
+            (
+                "+notes",
+                PackConfig {
+                    budget,
+                    ..Default::default()
+                },
+            ),
+        ];
+        let mut rows: Vec<BudgetResult> = policies
+            .iter()
+            .map(|(name, _)| BudgetResult {
+                policy: name,
+                budget,
+                recalled: 0,
+                recalled_full: 0,
+                total: 0,
+                tokens: 0,
+            })
+            .collect();
+
+        for q in suite {
+            let hits = retriever
+                .search(&Query {
+                    text: q.question.to_string(),
+                    scope: scope.clone(),
+                    k: seed_k,
+                    time_filter: None,
+                })
+                .await
+                .map_err(|e| anyhow!("search: {e}"))?;
+            let seeds: Vec<MemoryRef> = hits.iter().map(|h| h.memory).collect();
+
+            for (row, (_, cfg)) in rows.iter_mut().zip(&policies) {
+                let ctx = pack(&seeds, &source, *cfg);
+                let got: Vec<&SymbolInfo> = ctx
+                    .symbols
+                    .iter()
+                    .filter_map(|s| symbols.get(&s.memory))
+                    .collect();
+                let whole: Vec<&SymbolInfo> = ctx
+                    .symbols
+                    .iter()
+                    .filter(|s| s.form == Form::Full)
+                    .filter_map(|s| symbols.get(&s.memory))
+                    .collect();
+                row.total += 1;
+                row.tokens += ctx.tokens_used;
+                if q.hit(&got) {
+                    row.recalled += 1;
+                }
+                if q.hit(&whole) {
+                    row.recalled_full += 1;
+                }
+            }
+        }
+        packing.extend(rows);
+    }
+
     Ok(CodeEvalReport {
         embedder: embedder_choice.to_string(),
         index: plan.stats,
         arms,
+        packing,
     })
 }
 
@@ -632,6 +828,31 @@ pub fn format_report(r: &CodeEvalReport) -> String {
             cell("symbol"),
             cell("symbol+expand"),
         ));
+    }
+
+    // Packing ablation: cumulative, so each row is what one idea added.
+    if !r.packing.is_empty() {
+        out.push_str(
+            "\n## packing policy at a fixed budget\n\n\
+             Same seeds, same budget — only the assembly differs. Rows are \
+             cumulative.\n\n\
+             `any` counts a signature-only inclusion; `full` demands the whole \
+             body.\n\n\
+             | budget | policy | recall (any) | recall (full) | tokens used |\n\
+             |---|---|---|---|---|\n",
+        );
+        for c in &r.packing {
+            out.push_str(&format!(
+                "| {}k | {} | {:.0}% ({}/{}) | {:.0}% | {:.0} |\n",
+                c.budget / 1000,
+                c.policy,
+                c.recall() * 100.0,
+                c.recalled,
+                c.total,
+                c.recall_full() * 100.0,
+                c.tokens_per_query(),
+            ));
+        }
     }
 
     let wobbly: Vec<&str> = ["whole-file", "symbol", "symbol+expand"]
