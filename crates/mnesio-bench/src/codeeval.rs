@@ -27,10 +27,16 @@
 //!   measured identically, so the *ratio* between arms is meaningful; the
 //!   absolute counts are indicative only. Swapping in a real tokenizer would
 //!   move all arms together.
-//! - The suite is **hand-built over mnesio's own source**. It is a smoke test
-//!   for whether the approach has legs, *not* a benchmark — the queries were
-//!   written by someone who knows the answers. No number from here belongs on
-//!   the website; the phase's "done when" requires real repo tasks.
+//! - The default suite is **derived from the repo's own git history** (see
+//!   [`crate::gitsuite`]): queries are real commit subjects, gold is the
+//!   symbols that commit touched. `--suite hand` selects a hand-written smoke
+//!   test instead, which cannot support a claim — its queries were written by
+//!   someone who already knew the answers, so it can only show the pipeline
+//!   is not broken.
+//! - **`whole-file` is an unbounded baseline.** It charges the full text of
+//!   every file a hit came from, with no context cap. On repos with very large
+//!   files that exceeds any real budget, so read it as "what an uncapped
+//!   file-level strategy would cost", not as what a tuned agent does.
 
 use std::collections::HashMap;
 
@@ -51,51 +57,54 @@ fn est_tokens(s: &str) -> usize {
     s.len().div_ceil(4)
 }
 
-/// One question and the symbol that answers it.
+/// One task and the symbols that answer it.
 pub struct CodeQuery {
-    pub question: &'static str,
-    /// Name of the symbol a correct retrieval must surface.
-    pub expect: &'static str,
+    pub question: String,
+    /// Symbols a correct retrieval must surface. Scored as "at least one",
+    /// the realistic agent criterion: the task lands you in the right code.
+    pub gold: Vec<String>,
+}
+
+impl CodeQuery {
+    fn hit(&self, retrieved: &[&SymbolInfo]) -> bool {
+        retrieved.iter().any(|s| self.gold.contains(&s.name))
+    }
 }
 
 /// A hand-built suite over `crates/mnesio-index/src`.
 ///
-/// Chosen because every answer is a real symbol in that crate, so "did we
-/// retrieve it" is unambiguous.
-pub const INDEX_CRATE_SUITE: &[CodeQuery] = &[
-    CodeQuery {
-        question: "hybrid retriever reciprocal rank fusion",
-        expect: "HybridRetriever",
-    },
-    CodeQuery {
-        question: "lexical reranker coverage temporal phrase",
-        expect: "LexicalReranker",
-    },
-    CodeQuery {
-        question: "context tree relevant subtree routing",
-        expect: "ContextTree",
-    },
-    CodeQuery {
-        question: "bm25 tantivy search view",
-        expect: "Bm25View",
-    },
-    CodeQuery {
-        question: "paragraph chunker split document",
-        expect: "ParagraphChunker",
-    },
-    CodeQuery {
-        question: "snippet synthesizer extractive answer",
-        expect: "SnippetSynthesizer",
-    },
-    CodeQuery {
-        question: "tenant partitioned vector view multi tenant",
-        expect: "TenantPartitionedVectorView",
-    },
-    CodeQuery {
-        question: "agent acl attribution access",
-        expect: "AgentAclView",
-    },
-];
+/// **Disqualified from proving anything.** The queries were written by someone
+/// who already knew which symbol should come back, so this can only show the
+/// pipeline is not broken. For a suite that can actually support a claim, see
+/// [`crate::gitsuite`] — real commit subjects, gold from git's own line
+/// history.
+pub fn hand_written_suite() -> Vec<CodeQuery> {
+    [
+        ("hybrid retriever reciprocal rank fusion", "HybridRetriever"),
+        (
+            "lexical reranker coverage temporal phrase",
+            "LexicalReranker",
+        ),
+        ("context tree relevant subtree routing", "ContextTree"),
+        ("bm25 tantivy search view", "Bm25View"),
+        ("paragraph chunker split document", "ParagraphChunker"),
+        (
+            "snippet synthesizer extractive answer",
+            "SnippetSynthesizer",
+        ),
+        (
+            "tenant partitioned vector view multi tenant",
+            "TenantPartitionedVectorView",
+        ),
+        ("agent acl attribution access", "AgentAclView"),
+    ]
+    .into_iter()
+    .map(|(q, g)| CodeQuery {
+        question: q.to_string(),
+        gold: vec![g.to_string()],
+    })
+    .collect()
+}
 
 /// Result for one retrieval strategy at one `k`.
 #[derive(Debug, Clone)]
@@ -158,6 +167,39 @@ impl CodeEvalReport {
             .map(|a| a.recall())
             .fold(0.0, f32::max)
     }
+
+    /// Best recall this arm reaches without exceeding `budget` tokens/query.
+    ///
+    /// The decision an agent actually faces is a **context budget**, not a `k`.
+    /// Iso-recall answers "what does matching you cost?", which flatters an arm
+    /// that can afford to be expensive; this answers "given what I can afford,
+    /// who wins?" — and an arm whose cheapest cell already blows the budget
+    /// simply cannot play.
+    pub fn best_under_budget(&self, arm: &str, budget: f32) -> Option<&ArmResult> {
+        self.arms
+            .iter()
+            .filter(|a| a.name == arm && a.tokens_per_query() <= budget)
+            .max_by(|a, b| {
+                a.recalled
+                    .cmp(&b.recalled)
+                    .then_with(|| b.tokens.cmp(&a.tokens))
+            })
+    }
+
+    /// Did recall ever *fall* as `k` grew?
+    ///
+    /// Intuitively impossible — a larger `k` returns a superset — but
+    /// `HybridRetriever` over-fetches `k * over_fetch` candidates and then
+    /// normalises recency and graph-proximity *relative to that candidate
+    /// set*, so growing `k` changes the scores of the memories already in it.
+    /// The top-1 at `k=1` need not survive into the top-3 at `k=3`. Worth
+    /// reporting: a reader comparing two rows of the sweep would otherwise
+    /// assume a measurement error.
+    pub fn non_monotonic(&self, arm: &str) -> bool {
+        let mut cells: Vec<&ArmResult> = self.arms.iter().filter(|a| a.name == arm).collect();
+        cells.sort_by_key(|a| a.k);
+        cells.windows(2).any(|w| w[1].recalled < w[0].recalled)
+    }
 }
 
 /// What we need to know about an indexed symbol to score an arm.
@@ -167,16 +209,88 @@ struct SymbolInfo {
     text: String,
 }
 
-/// Recursively collect `.rs` files.
-fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+/// Parse `dir` and report every symbol's current location.
+///
+/// Split out from [`run_codeeval`] because the git suite has to be derived
+/// *from* the symbols before the run can score against it. Parsing is cheap —
+/// embedding is the expensive step — so doing it twice costs little and keeps
+/// the two concerns from tangling.
+pub fn trace_targets(dir: &str) -> Result<Vec<crate::gitsuite::TraceTarget>> {
+    let root = std::path::Path::new(dir);
+    let mut paths = Vec::new();
+    collect_sources(root, &mut paths);
+    paths.sort();
+
+    let mut out = Vec::new();
+    for p in &paths {
+        let key = p
+            .strip_prefix(root)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .to_string();
+        let (Some(lang), Ok(src)) = (language_of(p), std::fs::read_to_string(p)) else {
+            continue;
+        };
+        let Ok(pf) = HeuristicParser.parse(&key, lang, &src) else {
+            continue;
+        };
+        for s in pf.symbols {
+            out.push(crate::gitsuite::TraceTarget {
+                path: key.clone(),
+                name: s.name,
+                start_line: s.start_line,
+                end_line: s.end_line,
+            });
+        }
+    }
+    if out.is_empty() {
+        return Err(anyhow!("no symbols parsed under {dir}"));
+    }
+    Ok(out)
+}
+
+/// Extension → language tag, for the brace-delimited languages the
+/// `HeuristicParser` handles. Python is deliberately absent: the parser rejects
+/// indentation-based languages rather than producing plausible nonsense.
+fn language_of(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension()?.to_str()? {
+        "rs" => Some("rust"),
+        "go" => Some("go"),
+        "ts" | "tsx" => Some("typescript"),
+        "java" => Some("java"),
+        _ => None,
+    }
+}
+
+/// Directories that are never the repository's own source. Indexing them would
+/// drown the corpus in vendored code and inflate every arm equally, which
+/// hides rather than reveals a difference.
+const SKIP_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
+];
+
+/// Recursively collect parseable source files.
+fn collect_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            collect_rs(&p, out);
-        } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if SKIP_DIRS.contains(&name) {
+                continue;
+            }
+            collect_sources(&p, out);
+        } else if language_of(&p).is_some() {
             out.push(p);
         }
     }
@@ -193,21 +307,30 @@ pub async fn run_codeeval(
     let embedder = build_embedder(embedder_choice)?;
 
     // --- parse ---
+    let root = std::path::Path::new(dir);
     let mut paths = Vec::new();
-    collect_rs(std::path::Path::new(dir), &mut paths);
+    collect_sources(root, &mut paths);
     paths.sort();
     if paths.is_empty() {
-        return Err(anyhow!("no .rs files under {dir}"));
+        return Err(anyhow!(
+            "no parseable source under {dir} (rust/go/typescript/java)"
+        ));
     }
 
     let mut file_text: HashMap<String, String> = HashMap::new();
     let mut parsed: Vec<ParsedFile> = Vec::new();
     for p in &paths {
-        let key = p.to_string_lossy().to_string();
-        let Ok(src) = std::fs::read_to_string(p) else {
+        // Index by *repo-relative* path: that is what `Source::uri` means, and
+        // it is the path `git log -L` needs to trace a symbol's history.
+        let key = p
+            .strip_prefix(root)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .to_string();
+        let (Some(lang), Ok(src)) = (language_of(p), std::fs::read_to_string(p)) else {
             continue;
         };
-        if let Ok(pf) = HeuristicParser.parse(&key, "rust", &src) {
+        if let Ok(pf) = HeuristicParser.parse(&key, lang, &src) {
             file_text.insert(key, src);
             parsed.push(pf);
         }
@@ -236,10 +359,13 @@ pub async fn run_codeeval(
                 let mut m = m.clone();
                 m.embedding = vectors.into_iter().next();
 
+                // The indexer tags each memory with its file path; pick the tag
+                // that names a file we actually read, rather than guessing by
+                // extension.
                 let path = m
                     .tags
                     .iter()
-                    .find(|t| t.ends_with(".rs"))
+                    .find(|t| file_text.contains_key(*t))
                     .cloned()
                     .unwrap_or_default();
                 symbols.insert(
@@ -302,15 +428,15 @@ pub async fn run_codeeval(
                 hits.iter().filter_map(|h| symbols.get(&h.memory)).collect();
             if std::env::var("MNESIO_BENCH_DEBUG").is_ok() {
                 eprintln!(
-                    "  q={:?} want={} got={:?}",
+                    "  q={:?} want={:?} got={:?}",
                     q.question,
-                    q.expect,
+                    q.gold,
                     picked.iter().map(|s| &s.name).collect::<Vec<_>>()
                 );
             }
             symbol_only.total += 1;
             symbol_only.tokens += picked.iter().map(|s| est_tokens(&s.text)).sum::<usize>();
-            if picked.iter().any(|s| s.name == q.expect) {
+            if q.hit(&picked) {
                 symbol_only.recalled += 1;
             }
 
@@ -327,12 +453,13 @@ pub async fn run_codeeval(
                 .filter_map(|p| file_text.get(*p))
                 .map(|t| est_tokens(t))
                 .sum::<usize>();
-            // The whole file is present, so the expected symbol is recalled iff any
-            // retrieved file contains its definition.
-            if seen_files
-                .iter()
-                .any(|p| symbols.values().any(|s| &s.path == p && s.name == q.expect))
-            {
+            // The whole file is present, so every symbol defined in a retrieved
+            // file counts as delivered — that is the arm's whole advantage.
+            let in_file: Vec<&SymbolInfo> = symbols
+                .values()
+                .filter(|s| seen_files.contains(&s.path.as_str()))
+                .collect();
+            if q.hit(&in_file) {
                 whole_file.recalled += 1;
             }
 
@@ -350,7 +477,7 @@ pub async fn run_codeeval(
             let exp: Vec<&SymbolInfo> = ids.iter().filter_map(|r| symbols.get(r)).collect();
             expanded.total += 1;
             expanded.tokens += exp.iter().map(|s| est_tokens(&s.text)).sum::<usize>();
-            if exp.iter().any(|s| s.name == q.expect) {
+            if q.hit(&exp) {
                 expanded.recalled += 1;
             }
         }
@@ -440,10 +567,42 @@ pub fn format_report(r: &CodeEvalReport) -> String {
         ));
     }
 
+    // Iso-budget: the comparison an agent actually faces.
+    out.push_str("\n## iso-budget — best recall affordable at a context budget\n\n");
+    out.push_str(
+        "| budget (tok/query) | whole-file | symbol | symbol+expand |\n|---|---|---|---|\n",
+    );
+    for budget in [4_000.0f32, 16_000.0, 64_000.0] {
+        let cell = |arm: &str| match r.best_under_budget(arm, budget) {
+            Some(c) => format!("{:.0}% (k={})", c.recall() * 100.0, c.k),
+            None => "— can't fit".into(),
+        };
+        out.push_str(&format!(
+            "| {:.0}k | {} | {} | {} |\n",
+            budget / 1000.0,
+            cell("whole-file"),
+            cell("symbol"),
+            cell("symbol+expand"),
+        ));
+    }
+
+    let wobbly: Vec<&str> = ["whole-file", "symbol", "symbol+expand"]
+        .into_iter()
+        .filter(|a| r.non_monotonic(a))
+        .collect();
+    if !wobbly.is_empty() {
+        out.push_str(&format!(
+            "\n⚠ recall is non-monotonic in k for: {}. Not a measurement error — \
+             `HybridRetriever` over-fetches `k * over_fetch` candidates and \
+             normalises recency and graph-proximity across *that* set, so a \
+             larger k re-scores the memories already in it.\n",
+            wobbly.join(", ")
+        ));
+    }
+
     out.push_str(
         "\n_Tokens estimated as chars/4 — identical across arms, so ratios hold; \
-         absolute counts are indicative. Hand-built suite over our own source: a \
-         smoke test, not a benchmark._\n",
+         absolute counts are indicative._\n",
     );
     out
 }

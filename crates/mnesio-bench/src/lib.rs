@@ -39,6 +39,7 @@ pub mod edge;
 #[cfg(feature = "fetch")]
 pub mod fetch;
 pub mod gen;
+pub mod gitsuite;
 pub mod kveval;
 pub mod memeval;
 pub mod qaeval;

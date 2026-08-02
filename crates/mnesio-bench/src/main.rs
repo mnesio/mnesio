@@ -1502,6 +1502,14 @@ struct CodeEvalOpts {
     /// Sweep of top-k values, all measured on one index.
     ks: Vec<usize>,
     embedder: String,
+    /// `git` derives queries from real commit subjects; `hand` uses the
+    /// hand-written smoke suite, which cannot support a claim.
+    suite: String,
+    /// Symbols to trace through git history (one `git log -L` each).
+    /// 0 = all, which is the only setting that yields complete gold sets.
+    sample: usize,
+    /// Cap on derived queries.
+    queries: usize,
 }
 
 fn parse_codeeval(
@@ -1511,6 +1519,9 @@ fn parse_codeeval(
         dir: "crates/mnesio-index/src".into(),
         ks: vec![1, 3, 5, 10],
         embedder: "mock".into(),
+        suite: "git".into(),
+        sample: 0,
+        queries: 120,
     };
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1522,6 +1533,9 @@ fn parse_codeeval(
                     .collect::<Result<Vec<_>, _>>()?;
             }
             "--embedder" => opts.embedder = next_value(&mut iter, "--embedder")?,
+            "--suite" => opts.suite = next_value(&mut iter, "--suite")?,
+            "--sample" => opts.sample = next_value(&mut iter, "--sample")?.parse()?,
+            "--queries" => opts.queries = next_value(&mut iter, "--queries")?.parse()?,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -1533,15 +1547,59 @@ fn parse_codeeval(
 }
 
 async fn cmd_codeeval(opts: CodeEvalOpts) -> Result<()> {
-    use mnesio_bench::codeeval::{format_report, run_codeeval, INDEX_CRATE_SUITE};
+    use mnesio_bench::codeeval::{format_report, hand_written_suite, run_codeeval, trace_targets};
+    use mnesio_bench::gitsuite;
+
+    let suite = match opts.suite.as_str() {
+        "hand" => hand_written_suite(),
+        "git" => {
+            let all = trace_targets(&opts.dir)?;
+            // Default (--sample 0) traces everything. Sampling is offered only
+            // as a speed escape hatch and is *not* sound for a published
+            // number: a partial trace truncates gold sets and quietly biases
+            // the comparison toward the whole-file arm.
+            let sampled: Vec<_> = if opts.sample == 0 || opts.sample >= all.len() {
+                all.clone()
+            } else {
+                let stride = (all.len() / opts.sample).max(1);
+                all.iter().step_by(stride).cloned().collect()
+            };
+            if sampled.len() < all.len() {
+                eprintln!(
+                    "# WARNING: tracing only {} of {} symbols — gold sets will be \
+                     incomplete and the comparison is biased toward whole-file. \
+                     Use --sample 0 for a number you can report.",
+                    sampled.len(),
+                    all.len()
+                );
+            }
+            eprintln!(
+                "# tracing {} of {} symbols through git history…",
+                sampled.len(),
+                all.len()
+            );
+            let s = gitsuite::derive(&opts.dir, &sampled, opts.queries)?;
+            if s.is_empty() {
+                bail!(
+                    "no usable queries derived from {}'s history — the repo may \
+                     have too few descriptive commits touching indexed symbols",
+                    opts.dir
+                );
+            }
+            s
+        }
+        other => bail!("unknown --suite {other:?}; expected `git` or `hand`"),
+    };
+
     eprintln!(
-        "# mnesio-bench codeeval · dir={} · k={:?} · embedder={} · {} queries",
+        "# mnesio-bench codeeval · dir={} · k={:?} · embedder={} · suite={} · {} queries",
         opts.dir,
         opts.ks,
         opts.embedder,
-        INDEX_CRATE_SUITE.len()
+        opts.suite,
+        suite.len()
     );
-    let report = run_codeeval(&opts.dir, &opts.ks, &opts.embedder, INDEX_CRATE_SUITE).await?;
+    let report = run_codeeval(&opts.dir, &opts.ks, &opts.embedder, &suite).await?;
     println!("{}", format_report(&report));
     Ok(())
 }
@@ -1746,6 +1804,12 @@ fn print_help() {
          \x20\x20--dir            source dir to index   (default: crates/mnesio-index/src)\n\
          \x20\x20--k              comma-separated top-k sweep          (default: 1,3,5,10)\n\
          \x20\x20--embedder       mock | fastembed                         (default: mock)\n\
+         \x20\x20--suite          git | hand                               (default: git)\n\
+         \x20\x20                 git derives queries from real commit subjects; gold is\n\
+         \x20\x20                 the symbols the commit touched, per `git log -L`\n\
+         \x20\x20--sample         symbols to trace; 0 = all (default: 0 — only a full\n\
+         \x20\x20                 trace gives complete gold sets)\n\
+         \x20\x20--queries        cap on derived queries                   (default: 120)\n\
          \n\
          MEMEVAL OPTIONS:\n\
          \x20\x20--suite          locomo | longmemeval             (default: locomo)\n\
