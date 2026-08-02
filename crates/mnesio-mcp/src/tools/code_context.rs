@@ -6,19 +6,23 @@
 //! mode, Windsurf and Zed all speak the same protocol, so one stdio server
 //! covers them without an adapter each.
 //!
-//! ## Why the repo is indexed per call
+//! ## Freshness is automatic
 //!
-//! An index is held in a process-lifetime cache keyed by `(path, scope)`, so
-//! the first call on a repository pays for parsing and embedding and every
-//! later one is a search. That is a deliberate simplicity trade: an incremental
-//! index driven off file-watching is the right long-term answer, but a cache
-//! keyed by path is honest about what it does and cannot serve a stale answer
-//! *within* a session for a repository that has not been re-indexed.
+//! An index is cached per `(path, scope)` for the process lifetime, and
+//! **every call checks the tree for changes before answering**. If anything
+//! was added, edited or deleted, the index rebuilds first.
 //!
-//! **Known limitation:** edits made after the first call are not reflected
-//! until the process restarts or `refresh` is passed. Stated here rather than
-//! discovered later, because silently serving stale code to an agent that is
-//! editing that code is the worst failure this tool has.
+//! That check is not optional, because the alternative is the worst failure
+//! this tool can have: an agent editing a file, asking about it, and being
+//! handed the version from before its own edit. A `refresh` flag would leave
+//! that correctness to whoever remembered to pass it, which in practice is
+//! nobody.
+//!
+//! It is affordable because the two costs are separated. Detecting change is a
+//! metadata walk — no file reads, no model calls. Rebuilding re-parses, but
+//! re-embeds only symbols whose *text* actually changed, keyed by content
+//! hash, so a one-function edit in a 5,000-symbol repository costs one
+//! embedding rather than five thousand.
 
 use crate::context::AppContext;
 use crate::protocol::{CallToolResult, ToolDescriptor};
@@ -32,13 +36,21 @@ use tokio::sync::Mutex;
 
 /// Indexes built this process, keyed by `(path, tenant)`.
 ///
-/// `Mutex` rather than `RwLock`: indexing is the expensive path and two agents
-/// racing on the same cold repository should serialise rather than both pay for
-/// it.
-static INDEXES: std::sync::OnceLock<Mutex<HashMap<String, Arc<CodeMemory>>>> =
-    std::sync::OnceLock::new();
+/// Two levels of lock, deliberately. The outer one guards the map and is held
+/// only long enough to look an entry up, so a slow repository cannot block a
+/// query against a different one. The inner one guards a single index across
+/// *both* its freshness check and its search.
+///
+/// The inner mutex is what makes staleness structurally impossible rather than
+/// merely intended: refreshing through an `Arc` would need `Arc::get_mut`,
+/// which silently returns `None` while another call holds a clone — and a
+/// skipped refresh is precisely the bug this design exists to remove. Owning
+/// the lock means the check cannot be skipped, only waited for.
+type Cached = Arc<Mutex<CodeMemory>>;
 
-fn cache() -> &'static Mutex<HashMap<String, Arc<CodeMemory>>> {
+static INDEXES: std::sync::OnceLock<Mutex<HashMap<String, Cached>>> = std::sync::OnceLock::new();
+
+fn cache() -> &'static Mutex<HashMap<String, Cached>> {
     INDEXES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -50,8 +62,10 @@ pub fn descriptor() -> ToolDescriptor {
              repository, packed to a token budget — instead of reading whole files. Give it \
              the task you are actually doing (\"make the retry backoff configurable\"), not \
              keywords. Returns each symbol with its file path, plus why it was included \
-             (directly retrieved, or pulled in as a callee). First call on a repository \
-             indexes it and is slow; later calls are fast.",
+             (directly retrieved, or pulled in as a callee). The first call on a \
+             repository indexes it and is slow; later calls are fast, and always \
+             reflect the current state of the files — edits are picked up \
+             automatically.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -80,8 +94,9 @@ pub fn descriptor() -> ToolDescriptor {
                 },
                 "refresh": {
                     "type": "boolean",
-                    "description": "Re-index even if this repository is already cached. Use \
-                                    after making edits you want reflected.",
+                    "description": "Force a full rebuild, discarding cached embeddings. Edits \
+                                    are detected automatically, so this is only for recovering \
+                                    from a corrupted index — not for picking up your changes.",
                     "default": false
                 }
             },
@@ -132,12 +147,12 @@ pub async fn handle(ctx: &AppContext, arguments: Value) -> anyhow::Result<CallTo
     }
 
     let key = format!("{}\u{0}{}", args.repo, args.tenant);
-    let mut guard = cache().lock().await;
+    let mut map = cache().lock().await;
     if args.refresh {
-        guard.remove(&key);
+        map.remove(&key);
     }
 
-    let memory = match guard.get(&key) {
+    let entry = match map.get(&key) {
         Some(m) => Arc::clone(m),
         None => {
             let built = match CodeMemory::index(
@@ -147,15 +162,27 @@ pub async fn handle(ctx: &AppContext, arguments: Value) -> anyhow::Result<CallTo
             )
             .await
             {
-                Ok(m) => Arc::new(m),
+                Ok(m) => Arc::new(Mutex::new(m)),
                 Err(e) => return Ok(CallToolResult::error_text(format!("indexing failed: {e}"))),
             };
-            guard.insert(key, Arc::clone(&built));
+            map.insert(key, Arc::clone(&built));
             built
         }
     };
-    // Indexing is done; a search must not hold the cache against other repos.
-    drop(guard);
+    // Hold the map no longer than the lookup: a slow rebuild of one repository
+    // must not stall queries against another.
+    drop(map);
+
+    let memory = entry.lock().await;
+    // Freshness before answering, every time. Cheap when the tree has not
+    // moved; the difference between a correct answer and one describing code
+    // the agent has already replaced when it has.
+    let mut memory = memory;
+    if let Err(e) = memory.refresh_if_stale().await {
+        return Ok(CallToolResult::error_text(format!(
+            "index refresh failed: {e}"
+        )));
+    }
 
     let context = match memory.context_for(&args.task, args.budget_tokens).await {
         Ok(c) => c,

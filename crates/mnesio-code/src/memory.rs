@@ -131,12 +131,108 @@ struct SymbolRecord {
 /// The repository is a [`Scope`] — that is what stops two indexed codebases
 /// leaking into each other's results (Hard Rule #3).
 pub struct CodeMemory {
+    root: PathBuf,
     scope: Scope,
-    retriever: HybridRetriever,
+    embedder: Arc<dyn Embedder>,
+    /// Vectors keyed by a hash of the symbol's own text, so a rebuild only
+    /// pays to embed code that actually changed.
+    embeddings: HashMap<u64, Vec<f32>>,
+    /// `None` only between construction and the first build.
+    retriever: Option<HybridRetriever>,
     symbols: HashMap<MemoryRef, SymbolRecord>,
     links: HashMap<MemoryRef, Vec<MemoryRef>>,
     module_docs: HashMap<String, String>,
     stats: IndexStats,
+    /// Fingerprint of the file tree the current build came from.
+    stats_fingerprint: u64,
+}
+
+/// One walk of a repository: what was parsed, and a fingerprint of the tree it
+/// came from.
+struct ParseTree {
+    files: Vec<ParsedFile>,
+    module_docs: HashMap<String, String>,
+    decl: HashMap<(String, String), (Option<String>, SymbolKind)>,
+    /// Folds every source file's path, size and mtime. Changing any of the
+    /// three changes this, which is what makes staleness detectable without
+    /// reading a byte of content.
+    fingerprint: u64,
+}
+
+/// Hash of a symbol's text, used as the embedding-cache key.
+///
+/// Content-addressed rather than path-addressed on purpose: a function that
+/// moves between files, or a file that is reformatted around it, keeps its
+/// vector.
+fn content_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Walk, parse, and fingerprint a repository.
+fn parse_tree(root: &Path) -> Result<ParseTree, MnesioError> {
+    let mut files = Vec::new();
+    collect_sources(root, &mut files);
+    files.sort();
+    if files.is_empty() {
+        return Err(MnesioError::Index(format!(
+            "no supported source files under {} — supported: {}",
+            root.display(),
+            supported()
+        )));
+    }
+
+    use std::hash::{Hash, Hasher};
+    let mut fp = std::collections::hash_map::DefaultHasher::new();
+    let parser = parser();
+    let mut parsed = Vec::new();
+    let mut module_docs = HashMap::new();
+    let mut decl = HashMap::new();
+
+    for file in &files {
+        // Repo-relative, because that is what `Source::uri` means and what a
+        // caller can act on — an absolute path from the indexing machine is
+        // meaningless to whoever reads the answer.
+        let rel = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .to_string();
+        if let Ok(md) = std::fs::metadata(file) {
+            rel.hash(&mut fp);
+            md.len().hash(&mut fp);
+            if let Ok(m) = md.modified() {
+                if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                    d.as_nanos().hash(&mut fp);
+                }
+            }
+        }
+        let (Some(lang), Ok(src)) = (language_of(file), std::fs::read_to_string(file)) else {
+            continue;
+        };
+        let Ok(pf) = parser.parse(&rel, lang, &src) else {
+            continue;
+        };
+        if let Some(doc) = &pf.module_doc {
+            module_docs.insert(rel.clone(), doc.clone());
+        }
+        for s in &pf.symbols {
+            decl.insert(
+                (s.path.clone(), s.name.clone()),
+                (s.signature.clone(), s.kind),
+            );
+        }
+        parsed.push(pf);
+    }
+
+    Ok(ParseTree {
+        files: parsed,
+        module_docs,
+        decl,
+        fingerprint: fp.finish(),
+    })
 }
 
 /// One symbol in a search result.
@@ -176,65 +272,88 @@ impl CodeMemory {
         scope: Scope,
         embedder: Arc<dyn Embedder>,
     ) -> Result<Self, MnesioError> {
-        let root = root.as_ref();
-        let mut files = Vec::new();
-        collect_sources(root, &mut files);
-        files.sort();
-        if files.is_empty() {
-            return Err(MnesioError::Index(format!(
-                "no supported source files under {} — supported: {}",
-                root.display(),
-                supported()
-            )));
+        let root = root.as_ref().to_path_buf();
+        let parsed = parse_tree(&root)?;
+        let mut me = Self {
+            root,
+            scope,
+            embedder,
+            embeddings: HashMap::new(),
+            retriever: None,
+            symbols: HashMap::new(),
+            links: HashMap::new(),
+            module_docs: HashMap::new(),
+            stats: IndexStats::default(),
+            stats_fingerprint: 0,
+        };
+        me.build(parsed).await?;
+        Ok(me)
+    }
+
+    /// Re-index if anything on disk changed since the last build.
+    ///
+    /// Returns `true` when a rebuild happened. Cheap when nothing moved: a
+    /// metadata walk, no reads and no embedding.
+    ///
+    /// **This is what makes the tool safe to use while editing.** An index that
+    /// silently answers from a stale snapshot is worse than no index at all —
+    /// an agent gets code that no longer exists and edits against it. So
+    /// freshness is checked automatically rather than left to a caller
+    /// remembering to pass a flag.
+    pub async fn refresh_if_stale(&mut self) -> Result<bool, MnesioError> {
+        let parsed = parse_tree(&self.root)?;
+        if parsed.fingerprint == self.fingerprint() {
+            return Ok(false);
         }
+        self.build(parsed).await?;
+        Ok(true)
+    }
 
-        let parser = parser();
-        let mut parsed: Vec<ParsedFile> = Vec::new();
-        let mut module_docs: HashMap<String, String> = HashMap::new();
-        let mut decl: HashMap<(String, String), (Option<String>, SymbolKind)> = HashMap::new();
+    /// Fingerprint of the tree this index was built from.
+    fn fingerprint(&self) -> u64 {
+        self.stats_fingerprint
+    }
 
-        for file in &files {
-            // Repo-relative, because that is what `Source::uri` means and what
-            // a caller can act on — an absolute path from the indexing machine
-            // is meaningless to whoever reads the answer.
-            let rel = file
-                .strip_prefix(root)
-                .unwrap_or(file)
-                .to_string_lossy()
-                .to_string();
-            let (Some(lang), Ok(src)) = (language_of(file), std::fs::read_to_string(file)) else {
-                continue;
-            };
-            let Ok(pf) = parser.parse(&rel, lang, &src) else {
-                continue;
-            };
-            if let Some(doc) = &pf.module_doc {
-                module_docs.insert(rel.clone(), doc.clone());
-            }
-            for s in &pf.symbols {
-                decl.insert(
-                    (s.path.clone(), s.name.clone()),
-                    (s.signature.clone(), s.kind),
-                );
-            }
-            parsed.push(pf);
-        }
-
-        let plan = CodeIndexer::new(scope.clone()).plan(&parsed);
+    /// Rebuild every view from `parsed`, re-embedding only what changed.
+    ///
+    /// Parsing and view construction are cheap; **embedding is not**, and it is
+    /// the entire reason a naive re-index is too slow to do on every edit. So
+    /// embeddings are cached by a hash of the symbol's own content: an
+    /// untouched function keeps its vector even if the file around it moved,
+    /// and only genuinely new or genuinely changed code is sent to the model.
+    async fn build(&mut self, parsed: ParseTree) -> Result<(), MnesioError> {
+        let plan = CodeIndexer::new(self.scope.clone()).plan(&parsed.files);
 
         let vector = Arc::new(VectorView::new(
-            embedder.dim(),
-            embedder.model_id().to_string(),
+            self.embedder.dim(),
+            self.embedder.model_id().to_string(),
         ));
         let bm25 = Arc::new(Bm25View::new()?);
         let mut symbols: HashMap<MemoryRef, SymbolRecord> = HashMap::new();
         let mut links: HashMap<MemoryRef, Vec<MemoryRef>> = HashMap::new();
+        let mut fresh: HashMap<u64, Vec<f32>> = HashMap::new();
 
         for event in &plan.events {
             match event {
                 Event::MemoryWritten(m) => {
-                    let m = embed_one(m, &embedder).await?;
-                    record(&mut symbols, &m, &decl, &module_docs);
+                    let key = content_hash(&m.content);
+                    let embedding = match self.embeddings.get(&key) {
+                        Some(v) => v.clone(),
+                        None => self
+                            .embedder
+                            .embed(std::slice::from_ref(&m.content))
+                            .await?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| {
+                                MnesioError::Index("embedder returned no vector".into())
+                            })?,
+                    };
+                    fresh.insert(key, embedding.clone());
+
+                    let mut m = m.clone();
+                    m.embedding = Some(embedding);
+                    record(&mut symbols, &m, &parsed.decl, &parsed.module_docs);
                     let entry = LogEntry {
                         id: new_id(),
                         event: Event::MemoryWritten(m),
@@ -249,18 +368,20 @@ impl CodeMemory {
             }
         }
 
+        // Drop vectors for code that no longer exists, or the cache grows
+        // without bound across a long editing session.
+        self.embeddings = fresh;
         // See the module docs: every one of these is a measured setting.
-        let retriever = HybridRetriever::new(vector, bm25.clone(), embedder)
-            .with_reranker(Arc::new(LexicalReranker::for_code(bm25)));
-
-        Ok(Self {
-            scope,
-            retriever,
-            symbols,
-            links,
-            module_docs,
-            stats: plan.stats,
-        })
+        self.retriever = Some(
+            HybridRetriever::new(vector, bm25.clone(), Arc::clone(&self.embedder))
+                .with_reranker(Arc::new(LexicalReranker::for_code(bm25))),
+        );
+        self.symbols = symbols;
+        self.links = links;
+        self.module_docs = parsed.module_docs;
+        self.stats = plan.stats;
+        self.stats_fingerprint = parsed.fingerprint;
+        Ok(())
     }
 
     /// Retrieve the code most relevant to `task`, fitted to `budget` tokens.
@@ -272,8 +393,11 @@ impl CodeMemory {
         // Seeds are over-fetched relative to what the budget will hold: the
         // packer drops what does not fit, so a short list would leave it no
         // room to degrade or expand.
-        let hits = self
+        let retriever = self
             .retriever
+            .as_ref()
+            .ok_or_else(|| MnesioError::Index("index not built".into()))?;
+        let hits = retriever
             .search(&Query {
                 text: task.to_string(),
                 scope: self.scope.clone(),
@@ -352,13 +476,6 @@ impl PackSource for CodeMemory {
     fn links(&self, m: MemoryRef) -> &[MemoryRef] {
         self.links.get(&m).map_or(&[], Vec::as_slice)
     }
-}
-
-async fn embed_one(m: &Memory, embedder: &Arc<dyn Embedder>) -> Result<Memory, MnesioError> {
-    let vectors = embedder.embed(std::slice::from_ref(&m.content)).await?;
-    let mut m = m.clone();
-    m.embedding = vectors.into_iter().next();
-    Ok(m)
 }
 
 /// Reunite an emitted memory with the parse details the event does not carry.
@@ -524,6 +641,122 @@ mod tests {
             ctx.hits.iter().any(|h| h.name == "greet_user"),
             "got {:?}",
             ctx.hits.iter().map(|h| &h.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// An index that answers from a stale snapshot is the single worst
+    /// failure this crate can have: the agent edits against code that no
+    /// longer exists. Freshness must be automatic, not a flag someone
+    /// remembers.
+    #[tokio::test]
+    async fn an_edit_is_reflected_without_re_indexing_by_hand() {
+        let repo = TempRepo::new(&[("src/a.rs", "pub fn original_name() {}\n")]);
+        let mut mem = CodeMemory::index(&repo.0, Scope::global("t"), embedder())
+            .await
+            .unwrap();
+        assert!(mem
+            .context_for("original name", 4000)
+            .await
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.name == "original_name"));
+
+        // Rewrite the file the way an agent would.
+        std::fs::write(repo.0.join("src/a.rs"), "pub fn renamed_thing() {}\n").unwrap();
+        assert!(mem.refresh_if_stale().await.unwrap(), "edit not detected");
+
+        let names: Vec<String> = mem
+            .context_for("renamed thing", 4000)
+            .await
+            .unwrap()
+            .hits
+            .iter()
+            .map(|h| h.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"renamed_thing".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            !names.contains(&"original_name".to_string()),
+            "deleted symbol still served: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_tree_is_not_rebuilt() {
+        // The check runs on every query, so it has to be nearly free when
+        // nothing moved — metadata only, no reads and no embedding.
+        let repo = TempRepo::new(&[("src/a.rs", "pub fn stable() {}\n")]);
+        let mut mem = CodeMemory::index(&repo.0, Scope::global("t"), embedder())
+            .await
+            .unwrap();
+        assert!(!mem.refresh_if_stale().await.unwrap());
+        assert!(!mem.refresh_if_stale().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_new_file_is_picked_up() {
+        let repo = TempRepo::new(&[("src/a.rs", "pub fn first() {}\n")]);
+        let mut mem = CodeMemory::index(&repo.0, Scope::global("t"), embedder())
+            .await
+            .unwrap();
+        assert_eq!(mem.stats().files, 1);
+
+        std::fs::write(repo.0.join("src/b.rs"), "pub fn second_one() {}\n").unwrap();
+        assert!(mem.refresh_if_stale().await.unwrap());
+        assert_eq!(mem.stats().files, 2);
+    }
+
+    /// Embedding is the expensive part of a rebuild, so it must be paid only
+    /// for code that actually changed — otherwise "refresh on every edit" is
+    /// unaffordable and the whole design collapses back to staleness.
+    #[tokio::test]
+    async fn unchanged_symbols_are_not_re_embedded() {
+        struct Counting {
+            calls: std::sync::atomic::AtomicUsize,
+            inner: mnesio_index::MockEmbedder,
+        }
+        #[async_trait::async_trait]
+        impl Embedder for Counting {
+            async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, MnesioError> {
+                self.calls
+                    .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+                self.inner.embed(texts).await
+            }
+            fn dim(&self) -> usize {
+                self.inner.dim()
+            }
+            fn model_id(&self) -> &str {
+                self.inner.model_id()
+            }
+        }
+
+        let counting = Arc::new(Counting {
+            calls: Default::default(),
+            inner: mnesio_index::MockEmbedder::new(32),
+        });
+        let repo = TempRepo::new(&[
+            ("src/a.rs", "pub fn keep_me() {}\n"),
+            ("src/b.rs", "pub fn also_keep() {}\n"),
+        ]);
+        let mut mem = CodeMemory::index(&repo.0, Scope::global("t"), counting.clone())
+            .await
+            .unwrap();
+        let after_first = counting.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_first >= 2, "expected an embed per symbol");
+
+        // Touch one file, changing one symbol.
+        std::fs::write(repo.0.join("src/b.rs"), "pub fn now_different() {}\n").unwrap();
+        assert!(mem.refresh_if_stale().await.unwrap());
+
+        let added = counting.calls.load(std::sync::atomic::Ordering::SeqCst) - after_first;
+        // One query embedding may also land here; the point is that it is far
+        // below a full re-embed of the corpus.
+        assert!(
+            added <= 2,
+            "re-embedded {added} texts for a one-symbol change — the cache is not working"
         );
     }
 

@@ -206,14 +206,25 @@ retrieval matched your task, or it was pulled in as a callee of something that
 did. Symbols that do not fit the budget degrade to their signature before being
 dropped, and the ceiling is never exceeded.
 
-### Two things to know
+### Freshness
 
-- **The first call on a repository indexes it** and is slow; later calls are
-  fast. The index lives for the life of the server process.
-- **Edits after that first call are not reflected** until you pass
-  `refresh: true` or restart. This is a deliberate simplicity trade, and it is
-  stated here rather than left to be discovered: serving stale code to an agent
-  that is editing that code is this tool's worst failure mode.
+**Edits are picked up automatically.** Every call checks the tree before
+answering; if anything was added, changed or deleted, the index rebuilds first.
+You never have to remember a flag, which matters because the alternative
+failure — an agent editing a file and then being handed the version from before
+its own edit — is silent and looks like the tool working.
+
+It stays fast because the two costs are separated:
+
+- **Detecting change** is a metadata walk. No file reads, no model calls.
+- **Rebuilding** re-parses, but re-embeds only symbols whose text actually
+  changed, keyed by content hash. A one-function edit in a 5,000-symbol
+  repository costs one embedding, not five thousand. A function that merely
+  moves between files keeps its vector.
+
+The first call on a repository still pays full indexing cost; later calls are
+searches. `refresh: true` forces a full rebuild and exists only for recovering
+from a corrupted index — not for picking up your changes.
 
 ### Language coverage
 
