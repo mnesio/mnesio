@@ -1,6 +1,10 @@
 //! Real grammars: [`TreeSitterParser`], behind the `tree-sitter` feature.
 //!
-//! 22 languages, every one verified by a test that extracts a real symbol.
+//! 30 languages, every one verified by a test that extracts a real symbol.
+//!
+//! Two sources of query: 19 come from the grammar crate's own exported
+//! `TAGS_QUERY`; 8 more use a query written here in [`own_tags`], because
+//! their crate ships none. Both go through the same extraction path.
 //!
 //! ## One mechanism, every language
 //!
@@ -37,6 +41,62 @@ use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::parse::CodeParser;
 use crate::{CodeEdge, EdgeKind, ParseError, ParsedFile, Symbol, SymbolKind};
+
+/// Tags queries **we** wrote, for grammars whose crate ships none.
+///
+/// Same conventional capture names as an upstream `tags.scm`, so the single
+/// extraction path in [`TreeSitterParser::parse`] serves these unchanged. They
+/// are deliberately minimal — top-level definitions and call sites, not full
+/// syntax coverage — because that is all symbol retrieval needs, and a short
+/// query is one a reader can check against the grammar's node types.
+///
+/// Written rather than vendored: these are our own authorship against each
+/// grammar's public node names, which keeps the crate free of third-party
+/// query files and their notices. Every one is pinned by a test that extracts
+/// a real symbol, because a query that silently matches nothing is the exact
+/// failure this table exists to avoid.
+mod own_tags {
+    // Positional child patterns, not `name:` fields — these grammars expose the
+    // identifier as an ordinary child. Verified against each grammar's real
+    // parse tree rather than guessed from its node-types list.
+    pub const KOTLIN: &str = r#"
+(class_declaration (identifier) @name) @definition.class
+(function_declaration (identifier) @name) @definition.function
+"#;
+
+    pub const ZIG: &str = r#"
+(function_declaration (identifier) @name) @definition.function
+"#;
+
+    pub const HASKELL: &str = r#"
+(function (variable) @name) @definition.function
+"#;
+
+    pub const JULIA: &str = r#"
+(function_definition (signature (call_expression (identifier) @name))) @definition.function
+(struct_definition (identifier) @name) @definition.class
+"#;
+
+    pub const OBJC: &str = r#"
+(class_interface (identifier) @name) @definition.class
+(class_implementation (identifier) @name) @definition.class
+"#;
+
+    pub const HCL: &str = r#"
+(block (identifier) @name) @definition.class
+"#;
+
+    pub const SCALA: &str = r#"
+(class_definition (identifier) @name) @definition.class
+(object_definition (identifier) @name) @definition.module
+(trait_definition (identifier) @name) @definition.interface
+(function_definition (identifier) @name) @definition.function
+"#;
+
+    pub const BASH: &str = r#"
+(function_definition (word) @name) @definition.function
+"#;
+}
 
 /// One supported language.
 struct Grammar {
@@ -202,6 +262,54 @@ static GRAMMARS: &[Grammar] = &[
         extensions: &["elm"],
         language: || tree_sitter_elm::LANGUAGE.into(),
         tags: tree_sitter_elm::TAGS_QUERY,
+    },
+    Grammar {
+        name: "kotlin",
+        extensions: &["kt", "kts"],
+        language: || tree_sitter_kotlin_ng::LANGUAGE.into(),
+        tags: own_tags::KOTLIN,
+    },
+    Grammar {
+        name: "zig",
+        extensions: &["zig"],
+        language: || tree_sitter_zig::LANGUAGE.into(),
+        tags: own_tags::ZIG,
+    },
+    Grammar {
+        name: "haskell",
+        extensions: &["hs"],
+        language: || tree_sitter_haskell::LANGUAGE.into(),
+        tags: own_tags::HASKELL,
+    },
+    Grammar {
+        name: "julia",
+        extensions: &["jl"],
+        language: || tree_sitter_julia::LANGUAGE.into(),
+        tags: own_tags::JULIA,
+    },
+    Grammar {
+        name: "objc",
+        extensions: &["m", "mm"],
+        language: || tree_sitter_objc::LANGUAGE.into(),
+        tags: own_tags::OBJC,
+    },
+    Grammar {
+        name: "hcl",
+        extensions: &["tf", "hcl", "tfvars"],
+        language: || tree_sitter_hcl::LANGUAGE.into(),
+        tags: own_tags::HCL,
+    },
+    Grammar {
+        name: "scala",
+        extensions: &["scala", "sc"],
+        language: || tree_sitter_scala::LANGUAGE.into(),
+        tags: own_tags::SCALA,
+    },
+    Grammar {
+        name: "bash",
+        extensions: &["sh", "bash", "zsh"],
+        language: || tree_sitter_bash::LANGUAGE.into(),
+        tags: own_tags::BASH,
     },
 ];
 
@@ -491,6 +599,51 @@ mod tests {
             "go: {:?}",
             go.symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    /// Every self-authored query must extract a real symbol.
+    ///
+    /// A `.scm` that compiles but matches nothing is the exact failure this
+    /// table risks — the language would appear supported and index zero
+    /// symbols. One sample per language, checked by name.
+    #[test]
+    fn hand_written_queries_extract_real_symbols() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "kotlin",
+                "class Greeter {\n  fun greet() {}\n}\n",
+                "Greeter",
+            ),
+            ("zig", "pub fn add(a: i32) i32 { return a; }\n", "add"),
+            (
+                "haskell",
+                "double :: Int -> Int\ndouble x = x * 2\n",
+                "double",
+            ),
+            ("julia", "function solve(x)\n    return x\nend\n", "solve"),
+            ("objc", "@interface Greeter\n@end\n", "Greeter"),
+            (
+                "hcl",
+                "resource \"aws_s3_bucket\" \"b\" {\n  acl = \"private\"\n}\n",
+                "resource",
+            ),
+            (
+                "scala",
+                "class Retriever {\n  def search(q: String) = q\n}\n",
+                "Retriever",
+            ),
+            ("bash", "deploy() {\n  echo hi\n}\n", "deploy"),
+        ];
+        for (lang, src, want) in cases {
+            let f = TreeSitterParser
+                .parse("f", lang, src)
+                .unwrap_or_else(|e| panic!("{lang} failed to parse: {e}"));
+            let names: Vec<&str> = f.symbols.iter().map(|s| s.name.as_str()).collect();
+            assert!(
+                names.contains(want),
+                "{lang}: query matched nothing useful — wanted {want:?}, got {names:?}"
+            );
+        }
     }
 
     #[test]

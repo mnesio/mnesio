@@ -22,7 +22,7 @@ default = []
 # `parse_ts::GRAMMARS` — adding a language is a table entry, not new parsing
 # code, because every grammar ships the same standard `tags.scm` capture names
 # (`@definition.function`, `@reference.call`, …) upstream.
-tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript", "dep:tree-sitter-go", "dep:tree-sitter-java", "dep:tree-sitter-c", "dep:tree-sitter-cpp", "dep:tree-sitter-c-sharp", "dep:tree-sitter-ruby", "dep:tree-sitter-php", "dep:tree-sitter-swift", "dep:tree-sitter-lua", "dep:tree-sitter-elixir", "dep:tree-sitter-ocaml", "dep:tree-sitter-r", "dep:tree-sitter-dart", "dep:tree-sitter-solidity", "dep:tree-sitter-elm"]
+tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript", "dep:tree-sitter-go", "dep:tree-sitter-java", "dep:tree-sitter-c", "dep:tree-sitter-cpp", "dep:tree-sitter-c-sharp", "dep:tree-sitter-ruby", "dep:tree-sitter-php", "dep:tree-sitter-swift", "dep:tree-sitter-lua", "dep:tree-sitter-elixir", "dep:tree-sitter-ocaml", "dep:tree-sitter-r", "dep:tree-sitter-dart", "dep:tree-sitter-solidity", "dep:tree-sitter-elm", "dep:tree-sitter-kotlin-ng", "dep:tree-sitter-zig", "dep:tree-sitter-haskell", "dep:tree-sitter-julia", "dep:tree-sitter-objc", "dep:tree-sitter-hcl", "dep:tree-sitter-scala", "dep:tree-sitter-bash"]
 
 [dependencies]
 mnesio-core.workspace = true
@@ -32,6 +32,7 @@ mnesio-index.workspace = true
 serde = { workspace = true, features = ["derive"] }
 tracing.workspace = true
 tree-sitter = { version = "0.25", optional = true }
+tree-sitter-bash = { version = "0.25.1", optional = true }
 tree-sitter-c = { version = "0.24.2", optional = true }
 tree-sitter-c-sharp = { version = "0.23.5", optional = true }
 tree-sitter-cpp = { version = "0.23.4", optional = true }
@@ -39,18 +40,25 @@ tree-sitter-dart = { version = "0.2.0", optional = true }
 tree-sitter-elixir = { version = "0.3.5", optional = true }
 tree-sitter-elm = { version = "5.9.4", optional = true }
 tree-sitter-go = { version = "0.25.0", optional = true }
+tree-sitter-haskell = { version = "0.23.1", optional = true }
+tree-sitter-hcl = { version = "1.1.0", optional = true }
 tree-sitter-java = { version = "0.23.5", optional = true }
 tree-sitter-javascript = { version = "0.25.0", optional = true }
+tree-sitter-julia = { version = "0.23.1", optional = true }
+tree-sitter-kotlin-ng = { version = "1.1.0", optional = true }
 tree-sitter-lua = { version = "0.5.0", optional = true }
+tree-sitter-objc = { version = "3.0.2", optional = true }
 tree-sitter-ocaml = { version = "0.25.0", optional = true }
 tree-sitter-php = { version = "0.24.2", optional = true }
 tree-sitter-python = { version = "0.25.0", optional = true }
 tree-sitter-r = { version = "1.3.0", optional = true }
 tree-sitter-ruby = { version = "0.23.1", optional = true }
 tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-scala = { version = "0.26.0", optional = true }
 tree-sitter-solidity = { version = "1.2.13", optional = true }
 tree-sitter-swift = { version = "0.7.3", optional = true }
 tree-sitter-typescript = { version = "0.23.2", optional = true }
+tree-sitter-zig = { version = "1.1.2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
