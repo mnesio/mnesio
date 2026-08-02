@@ -40,11 +40,15 @@ pub mod index;
 pub mod memory;
 pub mod pack;
 pub mod parse;
+#[cfg(feature = "tree-sitter")]
+pub mod parse_ts;
 
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
 pub use memory::{CodeContext, CodeHit, CodeMemory};
 pub use pack::{pack, Form, PackConfig, PackSource, PackedContext, PackedSymbol, Reason};
 pub use parse::{CodeParser, HeuristicParser, ParseError};
+#[cfg(feature = "tree-sitter")]
+pub use parse_ts::TreeSitterParser;
 
 use serde::{Deserialize, Serialize};
 

@@ -18,7 +18,11 @@ readme = "../../README.md"
 # the `ollama` / `candle-kv` pattern. Tests run against `FakeParser`, so the
 # default build and CI stay light and offline.
 default = []
-tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust"]
+# Real grammars. Each language is one line here and one row in
+# `parse_ts::GRAMMARS` — adding a language is a table entry, not new parsing
+# code, because every grammar ships the same standard `tags.scm` capture names
+# (`@definition.function`, `@reference.call`, …) upstream.
+tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript", "dep:tree-sitter-go", "dep:tree-sitter-java", "dep:tree-sitter-c", "dep:tree-sitter-cpp", "dep:tree-sitter-c-sharp", "dep:tree-sitter-ruby", "dep:tree-sitter-php"]
 
 [dependencies]
 mnesio-core.workspace = true
@@ -27,8 +31,24 @@ mnesio-core.workspace = true
 mnesio-index.workspace = true
 serde = { workspace = true, features = ["derive"] }
 tracing.workspace = true
-tree-sitter = { version = "0.24", optional = true }
-tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-c = { version = "0.24.2", optional = true }
+tree-sitter-c-sharp = { version = "0.23.5", optional = true }
+tree-sitter-cpp = { version = "0.23.4", optional = true }
+tree-sitter-go = { version = "0.25.0", optional = true }
+tree-sitter-java = { version = "0.23.5", optional = true }
+tree-sitter-javascript = { version = "0.25.0", optional = true }
+tree-sitter-php = { version = "0.24.2", optional = true }
+tree-sitter-python = { version = "0.25.0", optional = true }
+tree-sitter-ruby = { version = "0.23.1", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-typescript = { version = "0.23.2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# The comparison only means anything with a grammar to compare against, so it
+# is gated rather than failing the default build.
+[[example]]
+name = "parser_compare"
+required-features = ["tree-sitter"]

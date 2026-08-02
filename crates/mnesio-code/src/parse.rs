@@ -185,6 +185,13 @@ impl CodeParser for HeuristicParser {
 // ---------------------------------------------------------------------------
 
 /// The leading documentation block of a file, cleaned of comment markers.
+/// Header prose of a whole file, for callers that have the source rather than
+/// pre-split lines — the tree-sitter parser, which never splits.
+pub fn module_doc_for(language: &str, source: &str) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    module_doc(&lines, language)
+}
+
 fn module_doc(lines: &[&str], language: &str) -> Option<String> {
     if INDENT_LANGUAGES.contains(&language) {
         // Python: the module docstring is the file's first statement.
