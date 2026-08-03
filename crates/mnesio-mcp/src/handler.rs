@@ -198,6 +198,7 @@ mod tests {
             "mnesio_search",
             "mnesio_record_outcome",
             "mnesio_code_context",
+            "mnesio_code_outcome",
         ] {
             assert!(
                 names.contains(&want.to_string()),

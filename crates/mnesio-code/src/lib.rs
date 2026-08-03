@@ -38,6 +38,7 @@
 
 pub mod index;
 pub mod memory;
+pub mod outcome;
 pub mod pack;
 pub mod parse;
 #[cfg(feature = "tree-sitter")]
@@ -46,6 +47,7 @@ pub mod persist;
 
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
 pub use memory::{CodeContext, CodeHit, CodeMemory};
+pub use outcome::{AttributedSymbol, Attribution, CodeOutcome, DecisionEvidence, EditResult};
 pub use pack::{pack, Form, PackConfig, PackSource, PackedContext, PackedSymbol, Reason};
 pub use parse::{CodeParser, HeuristicParser, ParseError};
 #[cfg(feature = "tree-sitter")]
