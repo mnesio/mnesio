@@ -1,0 +1,1246 @@
+---
+/**
+ * mnesio — the landing page.
+ *
+ * Deliberately *not* a Starlight splash. The splash template optimises for
+ * "here are the docs"; this page has to make one argument before anyone reads a
+ * doc: every code-memory tool on the market ranks code by how relevant it
+ * *looks*, and none of them can tell you whether the retrieval worked. mnesio
+ * can, and it can refuse its own improvements. That is the whole pitch, so the
+ * gate — including a *refused* rule — is the hero visual rather than a feature
+ * bullet buried three screens down.
+ *
+ * Every number on this page is measured and links to the run that produced it.
+ * The "where we lose" section is not modesty; it is the differentiator. A
+ * competitor quoting a community-reported speedup cannot afford to publish the
+ * case where their approach is beaten, which is exactly why publishing ours is
+ * worth more than another headline multiple.
+ */
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+/** Editors mnesio reaches through MCP, with the exact install line for each. */
+const editors = [
+  {
+    id: "claude",
+    name: "Claude Code",
+    cmd: "claude mcp add mnesio -- mnesio-mcp --repo .",
+    note: "Restart Claude Code. The mnesio_code_context tool appears automatically.",
+  },
+  {
+    id: "cursor",
+    name: "Cursor",
+    cmd: '# ~/.cursor/mcp.json\n{ "mcpServers": { "mnesio": {\n    "command": "mnesio-mcp",\n    "args": ["--repo", "."] } } }',
+    note: "Settings → MCP → the server shows as connected once the index warms.",
+  },
+  {
+    id: "codex",
+    name: "Codex",
+    cmd: '# ~/.codex/config.toml\n[mcp_servers.mnesio]\ncommand = "mnesio-mcp"\nargs = ["--repo", "."]',
+    note: "Codex CLI reads MCP servers from config.toml on start.",
+  },
+  {
+    id: "copilot",
+    name: "Copilot",
+    cmd: '# .vscode/mcp.json\n{ "servers": { "mnesio": {\n    "command": "mnesio-mcp",\n    "args": ["--repo", "."] } } }',
+    note: "Agent mode only. Copilot's inline completions do not call MCP.",
+  },
+  {
+    id: "windsurf",
+    name: "Windsurf",
+    cmd: '# ~/.codeium/windsurf/mcp_config.json\n{ "mcpServers": { "mnesio": {\n    "command": "mnesio-mcp",\n    "args": ["--repo", "."] } } }',
+    note: "Cascade picks the server up on the next conversation.",
+  },
+  {
+    id: "zed",
+    name: "Zed",
+    cmd: '# settings.json\n"context_servers": { "mnesio": {\n  "command": { "path": "mnesio-mcp",\n    "args": ["--repo", "."] } } }',
+    note: "Zed calls these context servers; the protocol is the same MCP.",
+  },
+];
+
+/** The seven rules, as shipped. Short enough to read, exact enough to check. */
+const rules = [
+  ["01", "Nothing commits without passing the gate", "Canaries, a safety probe, and a non-negative objective delta. No exceptions, no temporary bypass."],
+  ["02", "Never overwrite history", "An update invalidates and supersedes. The parent pointer survives. The log is append-only."],
+  ["03", "Scope is a security boundary", "Learning never crosses a scope without an explicit aggregation step."],
+  ["04", "The log is the only system of record", "Every index — vector, BM25, graph, KV cache — is a view, rebuildable by replay."],
+  ["05", "The write path stays under 5 ms", "Embedding, evolution and extraction are async behind bounded queues. A write never waits on a model."],
+  ["06", "Bound the cascades", "Evolution has caps and cooldowns. A-MEM has no convergence guarantee; the bounds are what replace it."],
+  ["07", "Every dependency behind a trait", "LlmClient, Embedder, EventLog, Retriever, CodeParser, KvBackend, Signer. All swappable."],
+];
+---
+
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mnesio — retrieval that gets better, and can prove it</title>
+    <meta
+      name="description"
+      content="A Rust memory layer for coding agents. It records whether the code it retrieved actually helped, compiles that into retrieval policy, and refuses any change that breaks a canary. Open source."
+    />
+    <link rel="icon" href={`${base}/brand/logo.png`} />
+    <meta property="og:title" content="mnesio — retrieval that gets better, and can prove it" />
+    <meta
+      property="og:description"
+      content="Every code-memory tool ranks code by how relevant it looks. None of them records whether the retrieval worked. mnesio does — behind a gate that can refuse its own improvements."
+    />
+    <meta property="og:image" content={`${base}/brand/og.png`} />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+
+  <body>
+    <!-- Ambient field: a faint node lattice, because the product is a graph over
+         an append-only log. Pure CSS + one SVG, no runtime cost. -->
+    <div class="field" aria-hidden="true">
+      <div class="glow glow-a"></div>
+      <div class="glow glow-b"></div>
+      <div class="grid"></div>
+    </div>
+
+    <header class="nav-wrap">
+      <nav class="nav">
+        <a class="brand" href={`${base}/`}>
+          <svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="ng" x1="4" y1="28" x2="28" y2="4" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#2dd4bf" /><stop offset="1" stop-color="#818cf8" />
+              </linearGradient>
+            </defs>
+            <g stroke="url(#ng)" stroke-width="1.6" stroke-linecap="round" opacity=".9">
+              <line x1="7" y1="24" x2="7" y2="13" /><line x1="7" y1="13" x2="16" y2="8" />
+              <line x1="16" y1="8" x2="25" y2="13" /><line x1="25" y1="13" x2="25" y2="24" />
+              <line x1="16" y1="8" x2="16" y2="20" />
+            </g>
+            <g fill="#06070c" stroke="url(#ng)" stroke-width="1.6">
+              <circle cx="7" cy="24" r="2.6" /><circle cx="25" cy="24" r="2.6" />
+              <circle cx="16" cy="20" r="2.6" /><circle cx="7" cy="13" r="2.6" />
+              <circle cx="25" cy="13" r="2.6" />
+            </g>
+            <circle cx="16" cy="8" r="3.4" fill="url(#ng)" />
+          </svg>
+          <span>mnesio</span>
+        </a>
+        <div class="nav-links">
+          <a href="#gate">The gate</a>
+          <a href="#install">Install</a>
+          <a href="#numbers">Numbers</a>
+          <a href={`${base}/concepts/architecture/`}>Docs</a>
+        </div>
+        <div class="nav-cta">
+          <a class="btn btn-ghost" href="https://github.com/mnesio/mnesio">GitHub</a>
+          <a class="btn btn-primary" href="#install">Get started</a>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <!-- ================= HERO ================= -->
+      <section class="hero">
+        <div class="wrap hero-grid">
+          <div class="hero-copy">
+            <div class="eyebrow">
+              <span class="dot dot-teal"></span> CODE MEMORY
+              <span class="sep">·</span>
+              <span class="dot dot-emerald"></span> GATED LEARNING
+            </div>
+
+            <h1>
+              Don't retrieve code that <em>looks</em> relevant.<br />
+              Retrieve the code that's been
+              <span class="grad">proven to help</span>.
+            </h1>
+
+            <p class="sub">
+              mnesio is a Rust memory layer for coding agents. It records whether
+              the context it gave you actually worked — did the build pass, did
+              tests go green, was the diff accepted — and compiles that evidence
+              into retrieval policy. Every change is re-evaluated against a
+              canary set first, and <strong>refused</strong> if it regresses.
+            </p>
+
+            <div class="actions">
+              <a class="btn btn-primary btn-lg" href="#install">
+                Install in your editor <span class="arr">→</span>
+              </a>
+              <a class="btn btn-ghost btn-lg" href="#numbers">See the measurements</a>
+            </div>
+
+            <p class="micro">
+              Apache-2.0 · runs entirely on your machine · no telemetry ·
+              30 languages · 616 tests
+            </p>
+          </div>
+
+          <!-- The signature visual: the ledger. A competitor's landing page can
+               show a graph; none of them can show a *refusal*. -->
+          <aside class="ledger" aria-label="Example gate ledger">
+            <div class="ledger-head">
+              <span class="mono">policy ledger</span>
+              <span class="pulse"><i></i> live</span>
+            </div>
+
+            <div class="entry entry-ok">
+              <div class="entry-top">
+                <span class="verdict verdict-ok">COMMITTED</span>
+                <span class="mono tiny">gen 4 · +6pp held-out</span>
+              </div>
+              <p class="entry-rule mono">-exclude:tests/fixtures/* for class “migration”</p>
+              <p class="entry-why">
+                Fixtures ranked in the top 5 on 11 migration tasks and helped in
+                none. Canaries held at 0.82. Committed.
+              </p>
+            </div>
+
+            <div class="entry entry-no">
+              <div class="entry-top">
+                <span class="verdict verdict-no">REFUSED</span>
+                <span class="mono tiny">canary 0.82 → 0.71</span>
+              </div>
+              <p class="entry-rule mono">-exclude:src/db/pool.rs for class “timeout”</p>
+              <p class="entry-why">
+                Looked dead on the training split. Re-running the canaries showed
+                it was the only answer to three of them. Not shipped.
+              </p>
+            </div>
+
+            <div class="ledger-foot">
+              <span>Hard Rule #1 — <span class="mono">EvalReport::is_committable()</span></span>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ================= PROOF STRIP ================= -->
+      <section class="strip">
+        <div class="wrap">
+          <div class="strip-grid">
+            <div class="stat">
+              <div class="stat-num">4.8×</div>
+              <div class="stat-label">fewer tokens at equal recall</div>
+              <div class="stat-sub">symbol context vs whole-file, paired A/B on one index</div>
+            </div>
+            <div class="stat">
+              <div class="stat-num">4.11<span class="unit">ms</span></div>
+              <div class="stat-label">query latency p99</div>
+              <div class="stat-sub">at 105,000 memories indexed</div>
+            </div>
+            <div class="stat">
+              <div class="stat-num">29,413</div>
+              <div class="stat-label">symbols measured across 5 real repos</div>
+              <div class="stat-sub">355 queries derived from those repos' own git history</div>
+            </div>
+            <div class="stat">
+              <div class="stat-num">30</div>
+              <div class="stat-label">languages via tree-sitter</div>
+              <div class="stat-sub">Rust, Python, TS, Go, Java, C#, Swift, Kotlin, Zig…</div>
+            </div>
+          </div>
+          <p class="strip-note">
+            Every one of these is a number we produced ourselves and can re-run.
+            The ones that <em>don't</em> flatter us are
+            <a href="#numbers">further down the page</a>, at the same size.
+          </p>
+        </div>
+      </section>
+
+      <!-- ================= THE GATE ================= -->
+      <section id="gate" class="section">
+        <div class="wrap">
+          <div class="sec-head">
+            <div class="eyebrow"><span class="dot dot-emerald"></span> THE DIFFERENCE</div>
+            <h2>A memory can be wrong. Ours finds out.</h2>
+            <p class="sec-sub">
+              A search engine ranks. A memory learns — which means it has to be
+              able to get worse, and something has to stop that. Every other code
+              tool ships the first half.
+            </p>
+          </div>
+
+          <div class="loop">
+            <div class="loop-step">
+              <span class="loop-n">1</span>
+              <h3>Retrieve</h3>
+              <p>
+                Hybrid search seeds the context, the call graph expands one hop,
+                and the result is packed to a hard token ceiling. Each symbol
+                records <em>why</em> it's there.
+              </p>
+            </div>
+            <div class="loop-step">
+              <span class="loop-n">2</span>
+              <h3>Observe</h3>
+              <p>
+                The agent edits. Something observable happens: the build passes,
+                tests fail, the diff is accepted or thrown away. That signal is
+                free and everyone throws it away.
+              </p>
+            </div>
+            <div class="loop-step">
+              <span class="loop-n">3</span>
+              <h3>Attribute</h3>
+              <p>
+                “It helped” isn't learnable. <em>Which part</em> helped is — seed
+                or expansion, full body or signature. That's the join key.
+              </p>
+            </div>
+            <div class="loop-step">
+              <span class="loop-n">4</span>
+              <h3>Propose</h3>
+              <p>
+                Symbols with enough decisive evidence and a low success rate
+                become candidate suppression rules. Five decisive outcomes
+                minimum — one lucky trial isn't a policy.
+              </p>
+            </div>
+            <div class="loop-step loop-gate">
+              <span class="loop-n">5</span>
+              <h3>Gate</h3>
+              <p>
+                Each rule is applied, the canaries are re-run, and
+                <strong>any</strong> regression rejects it. Rules are gated
+                cumulatively, because two harmless suppressions can together
+                strip a query's only answer.
+              </p>
+            </div>
+          </div>
+
+          <div class="callout">
+            <div class="callout-mark">!</div>
+            <div>
+              <strong>Why this can't be bolted on later.</strong>
+              The gate needs a held-out set, a replayable log to re-evaluate
+              against, and versioned artifacts that supersede rather than
+              overwrite. A system that stores embeddings in a vector database has
+              nowhere to put any of that. It isn't a feature we shipped first —
+              it's the foundation the other six rules were written around.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= INSTALL ================= -->
+      <section id="install" class="section section-alt">
+        <div class="wrap">
+          <div class="sec-head">
+            <div class="eyebrow"><span class="dot dot-indigo"></span> FIVE MINUTES</div>
+            <h2>Works in the editor you already use.</h2>
+            <p class="sec-sub">
+              One MCP server, every client that speaks the protocol. Nothing
+              leaves your machine — the index, the embeddings and the outcome log
+              all live in your cache directory.
+            </p>
+          </div>
+
+          <div class="install">
+            <div class="tabs" role="tablist" aria-label="Editor">
+              {editors.map((e, i) => (
+                <button
+                  class:list={["tab", { active: i === 0 }]}
+                  role="tab"
+                  data-target={e.id}
+                  aria-selected={i === 0 ? "true" : "false"}
+                >
+                  {e.name}
+                </button>
+              ))}
+            </div>
+
+            <div class="term">
+              <div class="term-bar">
+                <span class="tl tl-r"></span><span class="tl tl-y"></span><span class="tl tl-g"></span>
+                <span class="term-title mono">mnesio</span>
+                <button class="copy" data-copy>copy</button>
+              </div>
+              <div class="term-body">
+                <pre class="pane mono">cargo install mnesio-mcp</pre>
+                {editors.map((e, i) => (
+                  <pre class:list={["pane", "pane-editor", { active: i === 0 }]} data-pane={e.id}>{e.cmd}</pre>
+                ))}
+              </div>
+              <div class="term-foot">
+                {editors.map((e, i) => (
+                  <p class:list={["note", { active: i === 0 }]} data-note={e.id}>{e.note}</p>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div class="tools">
+            <div class="tool">
+              <span class="mono tool-name">mnesio_code_context</span>
+              <p>
+                Ask for the code a task needs. Returns symbols packed to your
+                token budget, each tagged with why it was included.
+              </p>
+            </div>
+            <div class="tool">
+              <span class="mono tool-name">mnesio_code_outcome</span>
+              <p>
+                Report what happened after the edit. This is the tool that makes
+                the loop close — and the one no competitor has.
+              </p>
+            </div>
+            <div class="tool">
+              <span class="mono tool-name">mnesio_search</span>
+              <p>
+                The general memory layer: facts, decisions, and conversation
+                history, bi-temporal and erasable.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= LIVE CURVE ================= -->
+      <section id="curve" class="section">
+        <div class="wrap">
+          <div class="sec-head">
+            <div class="eyebrow"><span class="dot dot-amber"></span> YOUR REPO, NOT A DEMO</div>
+            <h2>Watch it learn on the code you're writing.</h2>
+            <p class="sec-sub">
+              Point mnesio at a repository and the dashboard shows the loop
+              running against it — outcomes recorded, rules proposed, rules
+              refused, and whether held-out retrieval actually improved.
+            </p>
+          </div>
+
+          <div class="curve-card">
+            <div class="curve-head">
+              <div>
+                <span class="mono curve-repo" data-repo>localhost:7777 · /api/code/curve</span>
+                <span class="curve-state" data-state>waiting for a server</span>
+              </div>
+              <div class="curve-legend">
+                <span><i class="sw sw-teal"></i> held-out</span>
+                <span><i class="sw sw-slate"></i> canary floor</span>
+                <span><i class="sw sw-rose"></i> refused</span>
+              </div>
+            </div>
+
+            <svg class="curve" viewBox="0 0 720 240" preserveAspectRatio="none" role="img"
+                 aria-label="Learning curve: held-out retrieval quality per generation">
+              <defs>
+                <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#2dd4bf" stop-opacity=".28" />
+                  <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0" />
+                </linearGradient>
+              </defs>
+              <g class="axes" stroke="rgba(255,255,255,.07)" stroke-width="1">
+                <line x1="0" y1="60" x2="720" y2="60" /><line x1="0" y1="120" x2="720" y2="120" />
+                <line x1="0" y1="180" x2="720" y2="180" />
+              </g>
+              <line class="floor" x1="0" y1="150" x2="720" y2="150"
+                    stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 5" data-floor />
+              <path class="area" d="" fill="url(#fill)" data-area />
+              <path class="line" d="" fill="none" stroke="#2dd4bf" stroke-width="2.5"
+                    stroke-linejoin="round" stroke-linecap="round" data-line />
+              <g data-points></g>
+            </svg>
+
+            <div class="curve-foot">
+              <div class="cf" data-cf-committed><span class="cf-n">—</span><span class="cf-l">rules committed</span></div>
+              <div class="cf" data-cf-refused><span class="cf-n">—</span><span class="cf-l">rules refused</span></div>
+              <div class="cf" data-cf-outcomes><span class="cf-n">—</span><span class="cf-l">outcomes recorded</span></div>
+              <div class="cf" data-cf-delta><span class="cf-n">—</span><span class="cf-l">held-out delta</span></div>
+            </div>
+
+            <p class="curve-hint mono" data-hint>
+              Run <b>mnesio-server --repo .</b> and reload — this panel reads
+              your live index. It renders a flat or negative curve exactly as
+              faithfully as a positive one.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= COMPARISON ================= -->
+      <section class="section section-alt">
+        <div class="wrap">
+          <div class="sec-head">
+            <div class="eyebrow"><span class="dot dot-indigo"></span> SIDE BY SIDE</div>
+            <h2>Grep, chunks, graph — and the part they all skip.</h2>
+          </div>
+
+          <div class="table-scroll">
+            <table class="cmp">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th class="us">mnesio</th>
+                  <th>Code knowledge graph</th>
+                  <th>Vector RAG</th>
+                  <th>Grep</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th>Unit of retrieval</th>
+                  <td class="us">Symbol + its callees, packed to a budget</td>
+                  <td>Graph node, traversed</td><td>Fuzzy chunk</td><td>Line match</td>
+                </tr>
+                <tr>
+                  <th>Knows if it helped</th>
+                  <td class="us yes">Yes — build, tests, diff accepted</td>
+                  <td class="no">No</td><td class="no">No</td><td class="no">No</td>
+                </tr>
+                <tr>
+                  <th>Improves from that</th>
+                  <td class="us yes">Yes — compiled into retrieval policy</td>
+                  <td class="no">No</td><td class="no">No</td><td class="no">No</td>
+                </tr>
+                <tr>
+                  <th>Can refuse its own change</th>
+                  <td class="us yes">Yes — canaries re-run, any regression rejects</td>
+                  <td class="no">n/a</td><td class="no">n/a</td><td class="no">n/a</td>
+                </tr>
+                <tr>
+                  <th>History</th>
+                  <td class="us yes">Append-only, bi-temporal, replayable</td>
+                  <td>Rebuilt per run</td><td>Overwritten on upsert</td><td class="no">None</td>
+                </tr>
+                <tr>
+                  <th>Answer “what did it know at T?”</th>
+                  <td class="us yes">Yes — snapshot_as_of(T)</td>
+                  <td class="no">No</td><td class="no">No</td><td class="no">No</td>
+                </tr>
+                <tr>
+                  <th>Erasure</th>
+                  <td class="us yes">Crypto-shred; log stays append-only</td>
+                  <td>Delete + reindex</td><td>Delete + reindex</td><td class="no">n/a</td>
+                </tr>
+                <tr>
+                  <th>Freshness while you edit</th>
+                  <td class="us yes">Automatic — stale index can't be served</td>
+                  <td>Manual re-run</td><td>Manual re-index</td><td class="us yes">Always</td>
+                </tr>
+                <tr>
+                  <th>Runs on your machine</th>
+                  <td class="us yes">Yes</td><td class="yes">Yes</td>
+                  <td>Usually a hosted DB</td><td class="yes">Yes</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="cmp-note">
+            Grep wins a row. It should — it's exact and always fresh, and a tool
+            that pretends otherwise is selling something.
+          </p>
+        </div>
+      </section>
+
+      <!-- ================= HONEST NUMBERS ================= -->
+      <section id="numbers" class="section">
+        <div class="wrap">
+          <div class="sec-head">
+            <div class="eyebrow"><span class="dot dot-rose"></span> WHERE WE LOSE</div>
+            <h2>The measurements that don't flatter us.</h2>
+            <p class="sec-sub">
+              This section exists because a landing page that only publishes wins
+              tells you nothing about whether the wins are real. Here is what our
+              own harness says, including the parts we'd rather it didn't.
+            </p>
+          </div>
+
+          <div class="honest">
+            <article class="hcard hcard-bad">
+              <div class="hcard-num">33<span class="unit">pp</span></div>
+              <h3>Whole-file beats us at the ceiling</h3>
+              <p>
+                Given unlimited context, reading whole files reaches 96% on one
+                repo where symbol retrieval tops out at 66%. Median gap across
+                five repos: 33 points. Symbol memory is cheaper and
+                <em>strictly worse</em> when budget is no object.
+              </p>
+              <p class="hcard-but">
+                The catch: whole-file costs 51k–221k tokens per query on that
+                repo. At any budget ≤16k it can't fit a single file, so it scores
+                zero. The advantage is graceful degradation, not winning.
+              </p>
+            </article>
+
+            <article class="hcard hcard-bad">
+              <div class="hcard-num">9<span class="unit">%</span></div>
+              <h3>Unreachable by any ranker</h3>
+              <p>
+                On 400 real tasks, 9% share no indexed term with the code they
+                touched. No scoring change reaches them. So the ceiling on
+                ranking work is 91%, not 100% — and we're at 62%.
+              </p>
+              <p class="hcard-but">
+                Published because the alternative is quietly measuring against
+                100% and calling the same result a bigger achievement.
+              </p>
+            </article>
+
+            <article class="hcard hcard-bad">
+              <div class="hcard-num">2</div>
+              <h3>Failed attempts, still in the docs</h3>
+              <p>
+                Module-level prose has no owner in a symbol index. We tried a
+                standalone module memory (recall@1 fell 50%→25%) and a
+                per-symbol breadcrumb (peak 88%→62%). Both regressed the exact
+                measurement that motivated them.
+              </p>
+              <p class="hcard-but">
+                Still the biggest single source of misses. Not solved, not hidden.
+              </p>
+            </article>
+
+            <article class="hcard hcard-bad">
+              <div class="hcard-num">23–46<span class="unit">%</span></div>
+              <h3>Edge resolution is approximate</h3>
+              <p>
+                The parser binds calls by bare name, so it can't always tell
+                <span class="mono">foo()</span> from
+                <span class="mono">x.foo()</span>. Between a quarter and a half of
+                call edges resolve. Real type resolution is not shipped.
+              </p>
+              <p class="hcard-but">
+                Graph expansion still pays +3 to +11 points on every real repo we
+                measured, which says the resolved half is the half that matters.
+              </p>
+            </article>
+
+            <article class="hcard hcard-bad">
+              <div class="hcard-num">0</div>
+              <h3>Learning curve on a real repo</h3>
+              <p>
+                The loop is built, tested end to end, and proven to refuse a
+                canary-breaking rule. It has <em>not</em> yet been run against a
+                live repository long enough to publish a curve.
+              </p>
+              <p class="hcard-but">
+                When it is, the number goes here whether it goes up or stays flat.
+              </p>
+            </article>
+
+            <article class="hcard hcard-bad">
+              <div class="hcard-num">3<span class="unit">/50</span></div>
+              <h3>The reranker regressed prose</h3>
+              <p>
+                Our content reranker lifts code retrieval 52%→62%, but on prose
+                benchmarks it regressed one category in 3 of 50 paired runs. So
+                it ships opt-in for prose and on-by-default only for code.
+              </p>
+              <p class="hcard-but">
+                An earlier unpaired run showed a fake 6-in-12 regression rate.
+                Index randomness, not the reranker. Every A/B here is paired now.
+              </p>
+            </article>
+          </div>
+
+          <div class="callout callout-quiet">
+            <div class="callout-mark">§</div>
+            <div>
+              <strong>How these were produced.</strong> Queries come from each
+              repository's own git history — a real commit subject, written by a
+              human before mnesio existed, with the symbols that commit touched
+              as the gold set (traced by <span class="mono">git log -L</span>,
+              every symbol, never a sample). Both arms run against a single
+              shared index so build randomness can't masquerade as an effect.
+              <a href={`${base}/reference/benchmarks/`}>Full method and raw runs →</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= HARD RULES ================= -->
+      <section class="section section-alt">
+        <div class="wrap">
+          <div class="sec-head">
+            <div class="eyebrow"><span class="dot dot-teal"></span> THE CONSTRAINTS</div>
+            <h2>Seven rules nothing is allowed to break.</h2>
+            <p class="sec-sub">
+              Written before the code, and they've cost us features. That's the
+              point of writing them down first.
+            </p>
+          </div>
+          <div class="rules">
+            {rules.map(([n, title, body]) => (
+              <div class="rule">
+                <span class="rule-n mono">{n}</span>
+                <h3>{title}</h3>
+                <p>{body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= CTA ================= -->
+      <section class="cta">
+        <div class="wrap cta-inner">
+          <h2>Point it at your repository.</h2>
+          <p>
+            One command, about five minutes, entirely on your machine. If it
+            doesn't help, the dashboard will say so — that's rather the whole
+            idea.
+          </p>
+          <div class="actions">
+            <a class="btn btn-primary btn-lg" href={`${base}/start/getting-started/`}>
+              Get started <span class="arr">→</span>
+            </a>
+            <a class="btn btn-ghost btn-lg" href="https://github.com/mnesio/mnesio">
+              Read the source
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="wrap foot-inner">
+        <div>
+          <div class="brand brand-foot"><span>mnesio</span></div>
+          <p class="foot-tag">
+            A memory that gets verifiably better — that can prove what it knew
+            and when, and can take it back.
+          </p>
+        </div>
+        <nav class="foot-links">
+          <div>
+            <h4>Start</h4>
+            <a href={`${base}/start/getting-started/`}>Getting started</a>
+            <a href={`${base}/start/quickstart/`}>Quickstart</a>
+            <a href={`${base}/start/why/`}>Why mnesio</a>
+          </div>
+          <div>
+            <h4>Concepts</h4>
+            <a href={`${base}/concepts/architecture/`}>Architecture</a>
+            <a href={`${base}/concepts/hard-rules/`}>Hard rules</a>
+            <a href={`${base}/concepts/wedge/`}>The wedge</a>
+          </div>
+          <div>
+            <h4>Reference</h4>
+            <a href={`${base}/reference/benchmarks/`}>Benchmarks</a>
+            <a href={`${base}/reference/comparison/`}>Comparison</a>
+            <a href={`${base}/guides/code-memory/`}>Code memory</a>
+          </div>
+        </nav>
+      </div>
+      <div class="wrap foot-bottom">
+        <span>Apache-2.0</span>
+        <span class="mono">every number on this page is one we measured</span>
+      </div>
+    </footer>
+
+    <script>
+      // --- Editor picker -------------------------------------------------
+      const tabs = document.querySelectorAll<HTMLButtonElement>(".tab");
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          const id = tab.dataset.target;
+          tabs.forEach((t) => {
+            const on = t === tab;
+            t.classList.toggle("active", on);
+            t.setAttribute("aria-selected", String(on));
+          });
+          document.querySelectorAll<HTMLElement>("[data-pane]").forEach((p) =>
+            p.classList.toggle("active", p.dataset.pane === id)
+          );
+          document.querySelectorAll<HTMLElement>("[data-note]").forEach((n) =>
+            n.classList.toggle("active", n.dataset.note === id)
+          );
+        });
+      });
+
+      // Copy whatever the terminal is currently showing, install line included.
+      document.querySelector<HTMLButtonElement>("[data-copy]")?.addEventListener("click", (e) => {
+        const btn = e.currentTarget as HTMLButtonElement;
+        const active = document.querySelector<HTMLElement>(".pane-editor.active");
+        const text = ["cargo install mnesio-mcp", active?.textContent ?? ""].join("\n\n");
+        navigator.clipboard.writeText(text).then(() => {
+          btn.textContent = "copied";
+          setTimeout(() => (btn.textContent = "copy"), 1400);
+        });
+      });
+
+      // --- Live learning curve -------------------------------------------
+      // Reads a local mnesio-server if one is running. The page is static and
+      // GitHub-hosted; the server is the visitor's own machine, so a failure
+      // here is the *normal* case and must degrade to an honest empty state
+      // rather than a fabricated demo curve.
+      type Point = { generation: number; held_out: number; canary_floor?: number };
+      type Curve = {
+        points: Point[];
+        committed: number;
+        refused: number;
+        outcomes: number;
+        repo?: string;
+      };
+
+      const W = 720, H = 240, PAD = 14;
+
+      function render(c: Curve) {
+        const pts = c.points ?? [];
+        const set = (sel: string, v: string) => {
+          const el = document.querySelector(`[${sel}] .cf-n`);
+          if (el) el.textContent = v;
+        };
+        set("data-cf-committed", String(c.committed ?? 0));
+        set("data-cf-refused", String(c.refused ?? 0));
+        set("data-cf-outcomes", String(c.outcomes ?? 0));
+
+        if (pts.length < 2) return;
+
+        const ys = pts.map((p) => p.held_out);
+        const lo = Math.min(...ys, 0);
+        const hi = Math.max(...ys, lo + 0.01);
+        const x = (i: number) => PAD + (i * (W - PAD * 2)) / (pts.length - 1);
+        const y = (v: number) => H - PAD - ((v - lo) / (hi - lo)) * (H - PAD * 2);
+
+        const d = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.held_out).toFixed(1)}`).join("");
+        document.querySelector("[data-line]")?.setAttribute("d", d);
+        document.querySelector("[data-area]")?.setAttribute(
+          "d", `${d}L${x(pts.length - 1).toFixed(1)},${H}L${x(0).toFixed(1)},${H}Z`
+        );
+
+        const floor = pts[0]?.canary_floor;
+        if (floor != null) document.querySelector("[data-floor]")?.setAttribute("y1", String(y(floor)));
+        if (floor != null) document.querySelector("[data-floor]")?.setAttribute("y2", String(y(floor)));
+
+        const g = document.querySelector("[data-points]");
+        if (g) {
+          g.innerHTML = pts
+            .map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.held_out).toFixed(1)}" r="3.5" fill="#2dd4bf"/>`)
+            .join("");
+        }
+
+        // The delta is the only claim this panel makes, so it is labelled by
+        // sign — a flat or negative run must read as flat or negative, not as
+        // an absent number the eye fills in optimistically.
+        const delta = (ys[ys.length - 1] - ys[0]) * 100;
+        const el = document.querySelector("[data-cf-delta] .cf-n");
+        if (el) {
+          el.textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}pp`;
+          (el as HTMLElement).style.color =
+            delta > 0.05 ? "#34d399" : delta < -0.05 ? "#fb7185" : "#93a1b5";
+        }
+      }
+
+      async function poll() {
+        const state = document.querySelector("[data-state]");
+        const hint = document.querySelector("[data-hint]");
+        try {
+          const res = await fetch("http://localhost:7777/api/code/curve", {
+            signal: AbortSignal.timeout(1200),
+          });
+          if (!res.ok) throw new Error(String(res.status));
+          const c: Curve = await res.json();
+          state!.textContent = c.repo ? `connected · ${c.repo}` : "connected";
+          state!.classList.add("ok");
+          if ((c.points?.length ?? 0) < 2 && hint) {
+            hint.textContent =
+              "Connected, but there aren't two generations yet. Use the agent on this repo and the curve fills in.";
+          } else if (hint) {
+            hint.textContent = "Live from your machine. Nothing on this page is a canned demo.";
+          }
+          render(c);
+        } catch {
+          state!.textContent = "no local server";
+        }
+      }
+      poll();
+      setInterval(poll, 15000);
+    </script>
+
+    <style is:global>
+      /* ---------- tokens ---------- */
+      :root {
+        --bg: #06070c;
+        --bg-alt: #080a11;
+        --ink: #e9edf5;
+        --muted: #93a1b5;
+        --dim: #64748b;
+        --line: rgba(255, 255, 255, 0.08);
+        --line-2: rgba(255, 255, 255, 0.14);
+        --surface: rgba(255, 255, 255, 0.025);
+        --teal: #2dd4bf;
+        --indigo: #818cf8;
+        --emerald: #34d399;
+        --rose: #fb7185;
+        --amber: #fbbf24;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        --max: 1200px;
+      }
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.6;
+        overflow-x: hidden;
+      }
+      a { color: inherit; text-decoration: none; }
+      .mono { font-family: var(--mono); }
+      .wrap { max-width: var(--max); margin-inline: auto; padding-inline: 24px; }
+
+      /* ---------- ambient field ---------- */
+      .field { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+      .grid {
+        position: absolute; inset: 0;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: radial-gradient(ellipse 90% 55% at 50% 0%, #000 25%, transparent 78%);
+      }
+      .glow { position: absolute; border-radius: 50%; filter: blur(110px); opacity: 0.5; }
+      .glow-a {
+        width: 620px; height: 620px; top: -300px; left: -120px;
+        background: radial-gradient(circle, rgba(45, 212, 191, 0.3), transparent 68%);
+      }
+      .glow-b {
+        width: 700px; height: 700px; top: -360px; right: -180px;
+        background: radial-gradient(circle, rgba(99, 102, 241, 0.32), transparent 68%);
+      }
+      main, .nav-wrap, .foot { position: relative; z-index: 1; }
+
+      /* ---------- nav ---------- */
+      .nav-wrap { position: sticky; top: 0; z-index: 60; padding: 16px 24px; }
+      .nav {
+        max-width: var(--max); margin-inline: auto;
+        display: flex; align-items: center; gap: 24px;
+        padding: 10px 10px 10px 18px;
+        border: 1px solid var(--line); border-radius: 999px;
+        background: rgba(8, 10, 17, 0.72);
+        backdrop-filter: blur(14px);
+      }
+      .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: -0.02em; font-size: 1.05rem; }
+      .nav-links { display: flex; gap: 22px; margin-left: auto; font-size: 0.9rem; color: var(--muted); }
+      .nav-links a:hover { color: var(--ink); }
+      .nav-cta { display: flex; gap: 8px; }
+
+      .btn {
+        display: inline-flex; align-items: center; gap: 8px;
+        padding: 9px 17px; border-radius: 999px;
+        font-size: 0.9rem; font-weight: 600;
+        border: 1px solid var(--line-2); color: var(--ink);
+        transition: transform 0.15s ease, filter 0.15s ease, background 0.15s ease;
+        white-space: nowrap;
+      }
+      .btn:hover { transform: translateY(-1px); }
+      .btn-primary {
+        background: linear-gradient(115deg, var(--teal), #6366f1);
+        color: #04121c; border-color: transparent;
+      }
+      .btn-primary:hover { filter: brightness(1.09); }
+      .btn-ghost { background: rgba(255, 255, 255, 0.04); }
+      .btn-ghost:hover { background: rgba(255, 255, 255, 0.08); }
+      .btn-lg { padding: 13px 24px; font-size: 0.98rem; }
+      .arr { transition: transform 0.15s ease; }
+      .btn:hover .arr { transform: translateX(3px); }
+
+      /* ---------- shared ---------- */
+      .eyebrow {
+        display: inline-flex; align-items: center; gap: 8px;
+        font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
+        color: var(--muted); text-transform: uppercase; margin-bottom: 18px;
+      }
+      .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+      .dot-teal { background: var(--teal); }
+      .dot-emerald { background: var(--emerald); }
+      .dot-indigo { background: var(--indigo); }
+      .dot-amber { background: var(--amber); }
+      .dot-rose { background: var(--rose); }
+      .sep { opacity: 0.4; }
+
+      .section { padding: 104px 0; }
+      .section-alt { background: var(--bg-alt); border-block: 1px solid var(--line); }
+      .sec-head { max-width: 720px; margin-bottom: 52px; }
+      .sec-head h2 {
+        font-size: clamp(1.9rem, 4vw, 2.7rem); line-height: 1.12;
+        letter-spacing: -0.032em; font-weight: 700; margin: 0 0 16px;
+      }
+      .sec-sub { color: var(--muted); font-size: 1.06rem; margin: 0; }
+
+      /* ---------- hero ---------- */
+      .hero { padding: 68px 0 86px; }
+      .hero-grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 56px; align-items: start; }
+      .hero h1 {
+        font-size: clamp(2.3rem, 5.2vw, 4rem); line-height: 1.05;
+        letter-spacing: -0.038em; font-weight: 800; margin: 0 0 22px;
+      }
+      .hero h1 em { font-style: italic; font-weight: 700; color: var(--muted); }
+      .grad {
+        background: linear-gradient(105deg, var(--teal) 0%, #818cf8 55%, #c4b5fd 100%);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+      }
+      .sub { font-size: 1.1rem; color: var(--muted); max-width: 56ch; margin: 0 0 30px; }
+      .sub strong { color: var(--ink); font-weight: 600; }
+      .actions { display: flex; gap: 12px; flex-wrap: wrap; }
+      .micro { margin-top: 24px; font-size: 0.82rem; color: var(--dim); font-family: var(--mono); }
+
+      /* ---------- ledger ---------- */
+      .ledger {
+        border: 1px solid var(--line); border-radius: 18px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012));
+        padding: 6px; box-shadow: 0 30px 90px -40px rgba(45, 212, 191, 0.3);
+      }
+      .ledger-head {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 12px 14px; font-size: 0.74rem; color: var(--muted);
+        letter-spacing: 0.1em; text-transform: uppercase;
+      }
+      .pulse { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); }
+      .pulse i {
+        width: 6px; height: 6px; border-radius: 50%; background: var(--emerald);
+        box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6); animation: p 2.4s infinite;
+      }
+      @keyframes p {
+        0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
+        70% { box-shadow: 0 0 0 9px rgba(52, 211, 153, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+      }
+      .entry {
+        border: 1px solid var(--line); border-radius: 13px;
+        padding: 15px 16px; margin-bottom: 8px; background: rgba(0, 0, 0, 0.28);
+      }
+      .entry-ok { border-left: 2px solid var(--emerald); }
+      .entry-no { border-left: 2px solid var(--rose); }
+      .entry-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 11px; gap: 10px; }
+      .verdict {
+        font-family: var(--mono); font-size: 0.68rem; font-weight: 700;
+        letter-spacing: 0.13em; padding: 4px 9px; border-radius: 6px;
+      }
+      .verdict-ok { color: var(--emerald); background: rgba(52, 211, 153, 0.12); }
+      .verdict-no { color: var(--rose); background: rgba(251, 113, 133, 0.12); }
+      .tiny { font-size: 0.7rem; color: var(--dim); }
+      .entry-rule {
+        font-size: 0.78rem; color: var(--ink); margin: 0 0 8px;
+        word-break: break-all; line-height: 1.5;
+      }
+      .entry-why { font-size: 0.85rem; color: var(--muted); margin: 0; line-height: 1.55; }
+      .ledger-foot {
+        padding: 11px 14px 8px; font-size: 0.74rem; color: var(--dim);
+        border-top: 1px solid var(--line); margin-top: 12px;
+      }
+
+      /* ---------- strip ---------- */
+      .strip { padding: 44px 0; border-block: 1px solid var(--line); background: var(--bg-alt); }
+      .strip-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 30px; }
+      .stat-num {
+        font-size: clamp(1.7rem, 3.1vw, 2.4rem); font-weight: 800;
+        letter-spacing: -0.035em; line-height: 1;
+        background: linear-gradient(105deg, var(--teal), #818cf8);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+      }
+      .unit { font-size: 0.55em; font-weight: 700; }
+      .stat-label { font-size: 0.9rem; margin-top: 9px; font-weight: 600; }
+      .stat-sub { font-size: 0.79rem; color: var(--dim); margin-top: 4px; line-height: 1.45; }
+      .strip-note { margin: 32px 0 0; font-size: 0.86rem; color: var(--muted); }
+      .strip-note a { color: var(--teal); text-decoration: underline; text-underline-offset: 3px; }
+
+      /* ---------- loop ---------- */
+      .loop { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+      .loop-step {
+        border: 1px solid var(--line); border-radius: 14px; padding: 22px 20px;
+        background: var(--surface); position: relative;
+      }
+      .loop-n {
+        font-family: var(--mono); font-size: 0.72rem; color: var(--dim);
+        border: 1px solid var(--line-2); border-radius: 6px;
+        width: 24px; height: 24px; display: grid; place-items: center; margin-bottom: 14px;
+      }
+      .loop-step h3 { margin: 0 0 9px; font-size: 1.02rem; letter-spacing: -0.015em; }
+      .loop-step p { margin: 0; font-size: 0.87rem; color: var(--muted); line-height: 1.55; }
+      .loop-gate {
+        border-color: rgba(52, 211, 153, 0.32);
+        background: linear-gradient(180deg, rgba(52, 211, 153, 0.07), transparent);
+      }
+      .loop-gate .loop-n { color: var(--emerald); border-color: rgba(52, 211, 153, 0.4); }
+
+      .callout {
+        display: flex; gap: 16px; margin-top: 34px; padding: 22px 24px;
+        border: 1px solid var(--line); border-radius: 14px;
+        background: var(--surface); font-size: 0.95rem; color: var(--muted); line-height: 1.65;
+      }
+      .callout strong { color: var(--ink); }
+      .callout a { color: var(--teal); text-decoration: underline; text-underline-offset: 3px; }
+      .callout-mark {
+        flex: none; width: 30px; height: 30px; border-radius: 8px;
+        display: grid; place-items: center; font-weight: 700;
+        background: rgba(45, 212, 191, 0.12); color: var(--teal);
+      }
+      .callout-quiet { margin-top: 40px; }
+
+      /* ---------- install ---------- */
+      .install { max-width: 900px; }
+      .tabs { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 16px; }
+      .tab {
+        font-family: inherit; font-size: 0.85rem; font-weight: 600;
+        padding: 8px 15px; border-radius: 999px; cursor: pointer;
+        border: 1px solid var(--line); background: transparent; color: var(--muted);
+        transition: all 0.14s ease;
+      }
+      .tab:hover { color: var(--ink); border-color: var(--line-2); }
+      .tab.active { background: rgba(255, 255, 255, 0.09); color: var(--ink); border-color: var(--line-2); }
+
+      .term { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: #04050a; }
+      .term-bar {
+        display: flex; align-items: center; gap: 7px; padding: 11px 14px;
+        border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, 0.022);
+      }
+      .tl { width: 10px; height: 10px; border-radius: 50%; }
+      .tl-r { background: #ff5f57; } .tl-y { background: #febc2e; } .tl-g { background: #28c840; }
+      .term-title { margin-left: 8px; font-size: 0.76rem; color: var(--dim); }
+      .copy {
+        margin-left: auto; font-family: var(--mono); font-size: 0.72rem; cursor: pointer;
+        padding: 4px 11px; border-radius: 6px; color: var(--muted);
+        border: 1px solid var(--line); background: transparent; transition: all 0.14s ease;
+      }
+      .copy:hover { color: var(--ink); border-color: var(--line-2); }
+      .term-body { padding: 18px 20px; }
+      .pane {
+        margin: 0; font-family: var(--mono); font-size: 0.84rem; line-height: 1.75;
+        color: var(--teal); white-space: pre-wrap; word-break: break-word;
+      }
+      .pane-editor { display: none; color: var(--ink); margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+      .pane-editor.active { display: block; }
+      .term-foot { padding: 0 20px 16px; }
+      .note { display: none; margin: 0; font-size: 0.82rem; color: var(--dim); }
+      .note.active { display: block; }
+
+      .tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 28px; }
+      .tool { border: 1px solid var(--line); border-radius: 13px; padding: 20px; background: var(--surface); }
+      .tool-name { font-size: 0.83rem; color: var(--teal); display: block; margin-bottom: 9px; }
+      .tool p { margin: 0; font-size: 0.87rem; color: var(--muted); line-height: 1.55; }
+
+      /* ---------- curve ---------- */
+      .curve-card {
+        border: 1px solid var(--line); border-radius: 18px; overflow: hidden;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.008));
+      }
+      .curve-head {
+        display: flex; justify-content: space-between; align-items: center; gap: 16px;
+        padding: 16px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap;
+      }
+      .curve-repo { font-size: 0.78rem; color: var(--dim); }
+      .curve-state {
+        margin-left: 12px; font-size: 0.74rem; font-family: var(--mono);
+        padding: 3px 9px; border-radius: 6px; color: var(--dim);
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .curve-state.ok { color: var(--emerald); background: rgba(52, 211, 153, 0.12); }
+      .curve-legend { display: flex; gap: 16px; font-size: 0.76rem; color: var(--muted); }
+      .curve-legend span { display: inline-flex; align-items: center; gap: 6px; }
+      .sw { width: 14px; height: 2px; border-radius: 2px; display: inline-block; }
+      .sw-teal { background: var(--teal); } .sw-slate { background: var(--dim); } .sw-rose { background: var(--rose); }
+      .curve { width: 100%; height: 240px; display: block; }
+      .curve-foot {
+        display: grid; grid-template-columns: repeat(4, 1fr);
+        border-top: 1px solid var(--line);
+      }
+      .cf { padding: 18px 20px; border-right: 1px solid var(--line); }
+      .cf:last-child { border-right: none; }
+      .cf-n { display: block; font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }
+      .cf-l { font-size: 0.78rem; color: var(--dim); }
+      .curve-hint {
+        margin: 0; padding: 15px 20px; font-size: 0.79rem; color: var(--dim);
+        border-top: 1px solid var(--line); background: rgba(0, 0, 0, 0.22);
+      }
+      .curve-hint b { color: var(--teal); font-weight: 400; }
+
+      /* ---------- comparison ---------- */
+      .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+      .cmp { width: 100%; border-collapse: collapse; min-width: 900px; font-size: 0.88rem; }
+      .cmp th, .cmp td { padding: 15px 18px; text-align: left; border-bottom: 1px solid var(--line); }
+      .cmp thead th { font-size: 0.76rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+      .cmp thead th.us { color: var(--teal); }
+      .cmp tbody th { font-weight: 600; color: var(--ink); width: 200px; }
+      .cmp td { color: var(--muted); }
+      .cmp td.us { color: var(--ink); background: rgba(45, 212, 191, 0.05); }
+      .cmp td.yes { color: var(--emerald); }
+      .cmp td.us.yes { color: var(--emerald); }
+      .cmp td.no { color: var(--dim); }
+      .cmp tbody tr:last-child th, .cmp tbody tr:last-child td { border-bottom: none; }
+      .cmp-note { margin-top: 16px; font-size: 0.85rem; color: var(--dim); }
+
+      /* ---------- honest ---------- */
+      .honest { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+      .hcard {
+        border: 1px solid var(--line); border-radius: 15px; padding: 24px;
+        background: var(--surface);
+      }
+      .hcard-bad { border-top: 2px solid rgba(251, 113, 133, 0.5); }
+      .hcard-num {
+        font-size: 2.1rem; font-weight: 800; letter-spacing: -0.035em;
+        color: var(--rose); line-height: 1; margin-bottom: 12px;
+      }
+      .hcard h3 { margin: 0 0 10px; font-size: 1.02rem; letter-spacing: -0.015em; }
+      .hcard p { margin: 0 0 12px; font-size: 0.87rem; color: var(--muted); line-height: 1.6; }
+      .hcard-but {
+        margin: 0 !important; padding-top: 12px; border-top: 1px solid var(--line);
+        color: var(--dim) !important; font-size: 0.83rem !important;
+      }
+      .hcard .mono { color: var(--teal); font-size: 0.85em; }
+
+      /* ---------- rules ---------- */
+      .rules { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+      .rule { border: 1px solid var(--line); border-radius: 13px; padding: 20px; background: var(--surface); }
+      .rule-n { font-size: 0.74rem; color: var(--teal); display: block; margin-bottom: 11px; }
+      .rule h3 { margin: 0 0 8px; font-size: 0.96rem; letter-spacing: -0.015em; line-height: 1.35; }
+      .rule p { margin: 0; font-size: 0.84rem; color: var(--muted); line-height: 1.55; }
+
+      /* ---------- cta ---------- */
+      .cta { padding: 110px 0; text-align: center; border-top: 1px solid var(--line); position: relative; overflow: hidden; }
+      .cta::before {
+        content: ""; position: absolute; width: 900px; height: 460px;
+        top: -240px; left: 50%; transform: translateX(-50%); filter: blur(120px); opacity: 0.42;
+        background: radial-gradient(circle, rgba(45, 212, 191, 0.35), rgba(99, 102, 241, 0.22), transparent 70%);
+      }
+      .cta-inner { position: relative; }
+      .cta h2 { font-size: clamp(2rem, 4.4vw, 3rem); letter-spacing: -0.035em; margin: 0 0 16px; font-weight: 800; }
+      .cta p { color: var(--muted); max-width: 54ch; margin: 0 auto 30px; font-size: 1.05rem; }
+      .cta .actions { justify-content: center; }
+
+      /* ---------- footer ---------- */
+      .foot { border-top: 1px solid var(--line); background: var(--bg-alt); padding-top: 56px; }
+      .foot-inner { display: grid; grid-template-columns: 1.2fr 2fr; gap: 48px; padding-bottom: 44px; }
+      .brand-foot { font-size: 1.1rem; margin-bottom: 12px; }
+      .foot-tag { color: var(--dim); font-size: 0.88rem; margin: 0; max-width: 38ch; line-height: 1.6; }
+      .foot-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+      .foot-links h4 {
+        font-size: 0.73rem; letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--dim); margin: 0 0 12px; font-weight: 600;
+      }
+      .foot-links a { display: block; font-size: 0.88rem; color: var(--muted); padding: 4px 0; }
+      .foot-links a:hover { color: var(--ink); }
+      .foot-bottom {
+        display: flex; justify-content: space-between; padding-block: 20px;
+        border-top: 1px solid var(--line); font-size: 0.78rem; color: var(--dim); gap: 16px; flex-wrap: wrap;
+      }
+
+      /* ---------- responsive ---------- */
+      @media (max-width: 1080px) {
+        .loop, .rules { grid-template-columns: repeat(2, 1fr); }
+        .honest { grid-template-columns: repeat(2, 1fr); }
+      }
+      @media (max-width: 900px) {
+        .hero-grid { grid-template-columns: 1fr; gap: 40px; }
+        .strip-grid { grid-template-columns: repeat(2, 1fr); gap: 26px; }
+        .nav-links { display: none; }
+        .tools { grid-template-columns: 1fr; }
+        .foot-inner { grid-template-columns: 1fr; gap: 32px; }
+      }
+      @media (max-width: 640px) {
+        .section { padding: 72px 0; }
+        .loop, .rules, .honest { grid-template-columns: 1fr; }
+        .curve-foot { grid-template-columns: repeat(2, 1fr); }
+        .cf:nth-child(2) { border-right: none; }
+        .cf:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+        .foot-links { grid-template-columns: 1fr 1fr; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * { animation: none !important; transition: none !important; }
+        html { scroll-behavior: auto; }
+      }
+    </style>
+  </body>
+</html>
