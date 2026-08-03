@@ -21,6 +21,7 @@
 
 mod acl_worker;
 mod causal;
+mod code;
 mod demo;
 mod demo_llm;
 mod demo_procedural;
@@ -35,6 +36,7 @@ mod probe;
 mod provenance;
 mod viz;
 
+use axum::http::{HeaderValue, Method};
 use axum::routing::get;
 use axum::Router;
 use mnesio_core::event::Event;
@@ -50,6 +52,7 @@ use mnesio_store::FjallEventLog;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 use viz::AppState;
 
 /// Tenant the demo writer + viz read/write under. Production will derive
@@ -322,6 +325,27 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/agents", get(viz::agents))
         .route("/api/skills", get(viz::skills))
         .route("/api/graph", get(viz::graph))
+        // The one cross-origin route. mnesio.github.io is a static page, so
+        // its live panel can only read a server running on the visitor's own
+        // machine — which is a cross-origin request and needs CORS.
+        //
+        // Scoped to this single route rather than applied to the router: every
+        // other endpoint returns memory contents, search results, or graph
+        // structure, and none of them should be readable by whatever page the
+        // user happens to have open in another tab. This one returns counts and
+        // rates — no code, no paths, no symbol names — so the blast radius of
+        // the allowance is a repository name and a success rate.
+        .route(
+            "/api/code/curve",
+            get(code::code_curve).layer(
+                CorsLayer::new()
+                    .allow_origin([
+                        "https://mnesio.github.io".parse::<HeaderValue>().unwrap(),
+                        "http://localhost:4399".parse::<HeaderValue>().unwrap(),
+                    ])
+                    .allow_methods([Method::GET]),
+            ),
+        )
         .route("/api/causal/metrics", get(causal::causal_metrics))
         .route("/api/probe/metrics", get(probe::probe_metrics))
         .route("/api/kv/metrics", get(kv::kv_metrics))

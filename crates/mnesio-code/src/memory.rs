@@ -313,6 +313,17 @@ pub struct CodeContext {
     pub tokens_used: usize,
     /// Candidates that would not fit in any form.
     pub dropped: usize,
+    /// The packer's own output, kept rather than rendered away.
+    ///
+    /// [`CodeHit`] flattens `Reason` to `is_seed` for display, which is the
+    /// right shape for a model reading the context and the wrong one for
+    /// learning from it: an outcome has to be recorded against
+    /// [`crate::pack::Reason`] and [`crate::pack::Form`] to be attributable at
+    /// all, and neither survives the flattening. `outcome.rs` takes a
+    /// `PackedContext` for exactly this reason — "reconstructing it later is
+    /// impossible" — so dropping it here would have made recording an outcome
+    /// from the MCP server impossible without re-running retrieval.
+    pub packed: PackedContext,
 }
 
 impl CodeMemory {
@@ -542,6 +553,7 @@ impl CodeMemory {
                 .collect(),
             tokens_used: packed.tokens_used,
             dropped: packed.dropped,
+            packed,
         }
     }
 }

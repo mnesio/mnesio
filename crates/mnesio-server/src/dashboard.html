@@ -1643,5 +1643,102 @@
     load();
   })();
   </script>
+  <!-- ===== Phase 18 · The loop, on this repository ===== -->
+  <section id="code-panel" style="margin:28px auto 40px;max-width:1100px;padding:20px 24px;border:1px solid #2a2f3a;border-radius:12px;background:#11141b;color:#e6e9ef;">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <div>
+        <h2 style="margin:0;font-size:18px;">Phase 18 · Code memory — the loop on this repository</h2>
+        <div style="color:#9aa3b2;font-size:13px;margin-top:2px;">
+          Outcomes your editor recorded through <code style="color:#7ee7d4;">mnesio_code_outcome</code>, folded into a curve. This is <em>your</em> repo, not a demo corpus.
+        </div>
+      </div>
+      <button id="code-refresh" style="background:#1f6feb;color:#fff;border:0;border-radius:7px;padding:8px 14px;font-size:13px;cursor:pointer;">Refresh</button>
+    </div>
+
+    <div id="code-kpis" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:16px;"></div>
+    <div id="code-summary" style="margin-top:14px;font-size:13px;color:#c8cfdc;"></div>
+    <div id="code-chart" style="margin-top:16px;"></div>
+    <div id="code-caveat" style="margin-top:16px;padding:12px 14px;border:1px solid #3a2f22;background:#171208;border-radius:9px;font-size:12px;color:#d8c9a8;line-height:1.6;"></div>
+    <div id="code-where" style="color:#69718220;font-size:11px;margin-top:12px;color:#697182;font-family:ui-monospace,monospace;word-break:break-all;"></div>
+  </section>
+  <script>
+  (function () {
+    function kpi(label, value, accent, sub) {
+      return '<div style="flex:1;min-width:140px;background:#0c0e14;border:1px solid #232836;border-radius:9px;padding:12px 14px;">'
+        + '<div style="font-size:20px;font-weight:600;color:' + (accent || "#e6e9ef") + ';">' + value + '</div>'
+        + '<div style="font-size:12px;color:#9aa3b2;margin-top:2px;">' + label + '</div>'
+        + (sub ? '<div style="font-size:11px;color:#697182;margin-top:3px;">' + sub + '</div>' : '')
+        + '</div>';
+    }
+    function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]; }); }
+
+    // Bars, not a line. A line implies the points between the samples exist;
+    // with ten outcomes per generation they do not, and a smooth curve through
+    // four noisy batches is a picture of a trend nobody measured.
+    function chart(points) {
+      if (!points.length) {
+        return '<div style="color:#697182;font-size:13px;padding:18px 0;">No outcomes yet. Use an agent on this repository and call '
+          + '<code style="color:#7ee7d4;">mnesio_code_outcome</code> after each edit — the curve fills in from there.</div>';
+      }
+      var rows = points.map(function (p) {
+        var measured = p.success_rate !== null && p.success_rate !== undefined;
+        var pct = measured ? Math.round(p.success_rate * 100) : 0;
+        // An unmeasured generation gets a hatched grey bar at full width, never
+        // a zero-height one: "no decisive outcomes" and "everything failed" look
+        // identical at zero and mean opposite things.
+        var colour = !measured ? "#2a2f3a" : pct >= 60 ? "#3fb950" : pct >= 35 ? "#d29922" : "#f85149";
+        var w = measured ? Math.max(pct, 2) : 100;
+        return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
+          + '<div style="width:52px;font-size:11px;color:#697182;font-family:ui-monospace,monospace;">gen ' + p.generation + '</div>'
+          + '<div style="flex:1;background:#0c0e14;border:1px solid #232836;border-radius:5px;height:22px;overflow:hidden;">'
+          + '<div style="width:' + w + '%;height:100%;background:' + colour + (measured ? '' : ';opacity:.45') + ';"></div></div>'
+          + '<div style="width:150px;font-size:11px;color:#9aa3b2;text-align:right;font-family:ui-monospace,monospace;">'
+          + (measured ? pct + '% · ' + p.successes + '/' + p.decisive : 'no decisive outcomes')
+          + ' · ~' + p.mean_tokens + 'tok</div></div>';
+      }).join("");
+      return rows;
+    }
+
+    function render(d) {
+      var deltaTxt = "—", deltaCol = "#9aa3b2";
+      if (d.delta_pp !== null && d.delta_pp !== undefined) {
+        deltaTxt = (d.delta_pp >= 0 ? "+" : "") + d.delta_pp.toFixed(1) + "pp";
+        deltaCol = !d.delta_is_meaningful ? "#9aa3b2" : d.delta_pp > 0.5 ? "#3fb950" : d.delta_pp < -0.5 ? "#f85149" : "#9aa3b2";
+      }
+      document.getElementById("code-kpis").innerHTML =
+          kpi("outcomes recorded", d.outcomes, "#e6e9ef", d.decisive + " decisive · " + d.ambiguous + " ambiguous")
+        + kpi("held-out delta", deltaTxt, deltaCol, d.delta_is_meaningful ? "across " + d.points.length + " generations" : "not enough generations yet")
+        + kpi("rules proposed", d.proposed, "#d29922", d.symbols_with_evidence + " symbol(s) with evidence")
+        + kpi("committed", d.committed, "#3fb950", "gate: " + d.gate.replace("_", " "))
+        + kpi("refused", d.refused, "#f85149", "a gate that never refuses is untested");
+
+      document.getElementById("code-summary").textContent = d.summary;
+      document.getElementById("code-chart").innerHTML = chart(d.points || []);
+
+      var caveat = "<strong>Read this before quoting the number.</strong> " + esc(d.caveat);
+      if (d.gate === "not_running") {
+        caveat += " <br><br><strong>The gate has not run here.</strong> Committed and refused are zero because "
+          + "this server has no canary suite to re-evaluate against — not because nothing qualified. "
+          + "Proposals accumulate; none is in effect. The controlled measurement is <code>mnesio-bench learncurve</code>.";
+      }
+      if (d.skipped > 0) {
+        caveat += " <br><br><strong style='color:#f85149;'>" + d.skipped + " journal line(s) were unreadable</strong>, "
+          + "so this curve is computed from an incomplete sample and should not be trusted.";
+      }
+      document.getElementById("code-caveat").innerHTML = caveat;
+      document.getElementById("code-where").textContent = "repo " + d.repo + "  ·  journal " + d.journal;
+    }
+
+    function load() {
+      fetch("/api/code/curve").then(function (r) { return r.json(); }).then(render).catch(function (e) {
+        document.getElementById("code-summary").textContent = "could not read the curve: " + e;
+      });
+    }
+    document.getElementById("code-refresh").addEventListener("click", load);
+    load();
+    setInterval(load, 10000);
+  })();
+  </script>
 </body>
 </html>
+

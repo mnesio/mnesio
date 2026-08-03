@@ -761,12 +761,28 @@ const rules = [
       // GitHub-hosted; the server is the visitor's own machine, so a failure
       // here is the *normal* case and must degrade to an honest empty state
       // rather than a fabricated demo curve.
-      type Point = { generation: number; held_out: number; canary_floor?: number };
+      // Mirrors `mnesio_server::code::CurveResponse`. `success_rate` is null for
+      // a generation with no decisive outcomes — that is *unmeasured*, not
+      // zero, and the two must not be drawn the same way.
+      type Point = {
+        generation: number;
+        success_rate: number | null;
+        decisive: number;
+        successes: number;
+        mean_tokens: number;
+      };
       type Curve = {
         points: Point[];
         committed: number;
         refused: number;
+        proposed: number;
         outcomes: number;
+        delta_pp: number | null;
+        delta_is_meaningful: boolean;
+        skipped: number;
+        gate: string;
+        summary: string;
+        caveat: string;
         repo?: string;
       };
 
@@ -774,48 +790,60 @@ const rules = [
 
       function render(c: Curve) {
         const pts = c.points ?? [];
-        const set = (sel: string, v: string) => {
-          const el = document.querySelector(`[${sel}] .cf-n`);
-          if (el) el.textContent = v;
+        const set = (sel: string, v: string, colour?: string) => {
+          const el = document.querySelector<HTMLElement>(`[${sel}] .cf-n`);
+          if (!el) return;
+          el.textContent = v;
+          if (colour) el.style.color = colour;
         };
         set("data-cf-committed", String(c.committed ?? 0));
         set("data-cf-refused", String(c.refused ?? 0));
         set("data-cf-outcomes", String(c.outcomes ?? 0));
 
-        if (pts.length < 2) return;
+        // The delta is the only claim this panel makes, so it is labelled by
+        // sign, and greyed out until the server says three generations have
+        // measurable rates. Two points define a line through any pair of noisy
+        // samples; presenting that in colour would be a claim the data cannot
+        // support.
+        if (c.delta_pp == null) {
+          set("data-cf-delta", "—", "#64748b");
+        } else {
+          const d = c.delta_pp;
+          set(
+            "data-cf-delta",
+            `${d >= 0 ? "+" : ""}${d.toFixed(1)}pp`,
+            !c.delta_is_meaningful ? "#64748b" : d > 0.5 ? "#34d399" : d < -0.5 ? "#fb7185" : "#93a1b5"
+          );
+        }
 
-        const ys = pts.map((p) => p.held_out);
+        // Only generations that measured something get a point. Plotting an
+        // unmeasured batch at zero would draw a collapse that never happened.
+        const measured = pts
+          .map((p, i) => ({ i, r: p.success_rate }))
+          .filter((p): p is { i: number; r: number } => p.r != null);
+        if (measured.length < 2) return;
+
+        const ys = measured.map((p) => p.r);
         const lo = Math.min(...ys, 0);
         const hi = Math.max(...ys, lo + 0.01);
-        const x = (i: number) => PAD + (i * (W - PAD * 2)) / (pts.length - 1);
+        const x = (i: number) => PAD + (i * (W - PAD * 2)) / Math.max(pts.length - 1, 1);
         const y = (v: number) => H - PAD - ((v - lo) / (hi - lo)) * (H - PAD * 2);
 
-        const d = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.held_out).toFixed(1)}`).join("");
+        const d = measured
+          .map((p, n) => `${n ? "L" : "M"}${x(p.i).toFixed(1)},${y(p.r).toFixed(1)}`)
+          .join("");
         document.querySelector("[data-line]")?.setAttribute("d", d);
         document.querySelector("[data-area]")?.setAttribute(
-          "d", `${d}L${x(pts.length - 1).toFixed(1)},${H}L${x(0).toFixed(1)},${H}Z`
+          "d",
+          `${d}L${x(measured[measured.length - 1].i).toFixed(1)},${H}L${x(measured[0].i).toFixed(1)},${H}Z`
         );
-
-        const floor = pts[0]?.canary_floor;
-        if (floor != null) document.querySelector("[data-floor]")?.setAttribute("y1", String(y(floor)));
-        if (floor != null) document.querySelector("[data-floor]")?.setAttribute("y2", String(y(floor)));
+        document.querySelector("[data-floor]")?.setAttribute("stroke-opacity", "0");
 
         const g = document.querySelector("[data-points]");
         if (g) {
-          g.innerHTML = pts
-            .map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.held_out).toFixed(1)}" r="3.5" fill="#2dd4bf"/>`)
+          g.innerHTML = measured
+            .map((p) => `<circle cx="${x(p.i).toFixed(1)}" cy="${y(p.r).toFixed(1)}" r="3.5" fill="#2dd4bf"/>`)
             .join("");
-        }
-
-        // The delta is the only claim this panel makes, so it is labelled by
-        // sign — a flat or negative run must read as flat or negative, not as
-        // an absent number the eye fills in optimistically.
-        const delta = (ys[ys.length - 1] - ys[0]) * 100;
-        const el = document.querySelector("[data-cf-delta] .cf-n");
-        if (el) {
-          el.textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}pp`;
-          (el as HTMLElement).style.color =
-            delta > 0.05 ? "#34d399" : delta < -0.05 ? "#fb7185" : "#93a1b5";
         }
       }
 
@@ -828,13 +856,17 @@ const rules = [
           });
           if (!res.ok) throw new Error(String(res.status));
           const c: Curve = await res.json();
-          state!.textContent = c.repo ? `connected · ${c.repo}` : "connected";
+          const name = c.repo?.split("/").filter(Boolean).pop();
+          state!.textContent = name ? `connected · ${name}` : "connected";
           state!.classList.add("ok");
-          if ((c.points?.length ?? 0) < 2 && hint) {
+          if (hint) {
+            // The server ships its own caveat; echoing it here rather than
+            // writing a second, friendlier one keeps a single wording that
+            // cannot drift into something more flattering than the data.
             hint.textContent =
-              "Connected, but there aren't two generations yet. Use the agent on this repo and the curve fills in.";
-          } else if (hint) {
-            hint.textContent = "Live from your machine. Nothing on this page is a canned demo.";
+              c.outcomes === 0
+                ? "Connected. No outcomes recorded on this repository yet — use an agent on it and call mnesio_code_outcome after each edit."
+                : `${c.summary} — ${c.caveat}`;
           }
           render(c);
         } catch {

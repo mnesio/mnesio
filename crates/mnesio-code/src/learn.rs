@@ -120,6 +120,20 @@ impl SymbolLedger {
     /// which symbol mattered, so pretending otherwise would invent precision.
     /// Counterfactual masking (Phase 10) is what replaces this with a real
     /// per-symbol contribution.
+    /// How many distinct symbols have at least one decisive outcome recorded
+    /// against them.
+    ///
+    /// The *breadth* of the evidence, which a proposal count alone conceals:
+    /// three rules drawn from three symbols and three rules drawn from three
+    /// hundred describe very different states of knowledge, and only the
+    /// second is a loop that has seen the repository.
+    pub fn symbols_with_decisive_evidence(&self) -> usize {
+        self.per_symbol
+            .values()
+            .filter(|e| e.decisive() > 0)
+            .count()
+    }
+
     pub fn record(&mut self, outcome: &CodeOutcome) {
         let class = query_class(&outcome.task);
         for s in &outcome.symbols {

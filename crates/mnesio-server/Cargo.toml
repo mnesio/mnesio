@@ -37,6 +37,7 @@ metal = ["mnesio-kv/metal"]
 
 [dependencies]
 mnesio-core.workspace = true
+mnesio-code.workspace = true
 mnesio-store.workspace = true
 mnesio-index.workspace = true
 mnesio-graph.workspace = true

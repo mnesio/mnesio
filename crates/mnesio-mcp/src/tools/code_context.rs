@@ -54,6 +54,18 @@ fn cache() -> &'static Mutex<HashMap<String, Cached>> {
     INDEXES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// What has been served but not yet answered for.
+///
+/// Process-wide, because the outcome arrives on a later, independent tool call
+/// and MCP carries no state between them. See [`super::code_session`] for why
+/// an outcome that cannot find its context is refused rather than recorded.
+static SESSIONS: std::sync::OnceLock<Mutex<super::code_session::SessionStore>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn sessions() -> &'static Mutex<super::code_session::SessionStore> {
+    SESSIONS.get_or_init(|| Mutex::new(super::code_session::SessionStore::default()))
+}
+
 pub fn descriptor() -> ToolDescriptor {
     ToolDescriptor {
         name: "mnesio_code_context",
@@ -188,6 +200,14 @@ pub async fn handle(ctx: &AppContext, arguments: Value) -> anyhow::Result<CallTo
         Ok(c) => c,
         Err(e) => return Ok(CallToolResult::error_text(format!("retrieval failed: {e}"))),
     };
+
+    // Remember what was served so a later `mnesio_code_outcome` can say which
+    // symbols the verdict is about. Without this the outcome is a bare
+    // success/failure flag, which is not something a compiler can learn from.
+    sessions()
+        .lock()
+        .await
+        .remember(&args.repo, &args.task, context.packed.clone());
 
     Ok(CallToolResult::text(render(&context, memory.stats())))
 }

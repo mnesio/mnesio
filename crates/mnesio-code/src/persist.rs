@@ -106,11 +106,15 @@ impl EmbeddingCache {
 /// index is derived data about a checkout, not part of it, and writing into
 /// someone's working tree is a surprise they did not ask for.
 pub fn cache_path(repo: &Path) -> PathBuf {
-    cache_path_in(&default_base(), repo)
+    cache_path_in(&cache_base(), repo)
 }
 
 /// Root of the cache directory for this machine.
-fn default_base() -> PathBuf {
+///
+/// Public so sibling modules that keep their own per-repo state — the outcome
+/// journal, for one — land beside the embedding cache instead of inventing a
+/// second location a user would have to learn about separately.
+pub fn cache_base() -> PathBuf {
     std::env::var_os("MNESIO_CACHE_DIR")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from))
@@ -146,7 +150,7 @@ pub fn cache_path_in(base: &Path, repo: &Path) -> PathBuf {
 /// re-index, never a failed startup. The reason is logged so a permanently
 /// cold cache is diagnosable instead of merely slow.
 pub fn load(repo: &Path, model_id: &str, dim: usize) -> Option<EmbeddingCache> {
-    load_in(&default_base(), repo, model_id, dim)
+    load_in(&cache_base(), repo, model_id, dim)
 }
 
 /// [`load`] under an explicit cache root.
@@ -181,7 +185,7 @@ pub fn load_in(base: &Path, repo: &Path, model_id: &str, dim: usize) -> Option<E
 /// previous cache intact rather than a truncated file that fails to parse on
 /// the next start.
 pub fn store(repo: &Path, cache: &EmbeddingCache) -> Result<(), MnesioError> {
-    store_in(&default_base(), repo, cache)
+    store_in(&cache_base(), repo, cache)
 }
 
 /// [`store`] under an explicit cache root.

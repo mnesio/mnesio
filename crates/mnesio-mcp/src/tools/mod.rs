@@ -12,6 +12,7 @@ use serde_json::Value;
 
 pub mod code_context;
 pub mod code_outcome;
+pub mod code_session;
 pub mod record_outcome;
 pub mod search;
 pub mod write_memory;

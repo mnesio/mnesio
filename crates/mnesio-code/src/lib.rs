@@ -36,7 +36,9 @@
 //! - [`HeuristicParser`] — dependency-free line/brace scanning; what the tests
 //!   run on. Real grammars land behind the `tree-sitter` feature.
 
+pub mod curve;
 pub mod index;
+pub mod journal;
 pub mod learn;
 pub mod memory;
 pub mod outcome;
@@ -46,7 +48,9 @@ pub mod parse;
 pub mod parse_ts;
 pub mod persist;
 
+pub use curve::{CurvePoint, LiveCurve};
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
+pub use journal::{JournalEntry, JournalRead, OutcomeJournal};
 pub use learn::{LearnConfig, RuleProposal, SymbolLedger};
 pub use memory::{CodeContext, CodeHit, CodeMemory};
 pub use outcome::{AttributedSymbol, Attribution, CodeOutcome, DecisionEvidence, EditResult};
