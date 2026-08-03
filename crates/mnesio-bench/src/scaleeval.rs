@@ -60,6 +60,15 @@ impl RepoResult {
     pub fn ceiling_gap(&self) -> f32 {
         self.whole_file_peak - self.symbol_peak
     }
+
+    /// Is this corpus large enough for the result to mean anything?
+    ///
+    /// See [`MIN_DISCRIMINATING_SYMBOLS`]. A repository below the floor scores
+    /// 100% because top-`k` reaches most of it, which says nothing about
+    /// retrieval quality and everything about the repository being tiny.
+    pub fn is_discriminating(&self) -> bool {
+        self.symbols >= MIN_DISCRIMINATING_SYMBOLS
+    }
 }
 
 /// Every repository, plus the distribution across them.
@@ -71,6 +80,20 @@ pub struct ScaleReport {
     /// reports a survivorship-biased result.
     pub skipped: Vec<(String, String)>,
 }
+
+/// Smallest corpus that can discriminate between retrieval strategies.
+///
+/// With `k` swept to 20, a repository of 49 symbols has top-20 covering 40% of
+/// everything it contains — recall is near-guaranteed by corpus size, not by
+/// ranking. Four of the first nine repositories measured scored exactly
+/// 100%/100% with a 0pp gap for that reason, and they pulled the p75 and max
+/// of every metric to 100%, making the suite look better than it is.
+///
+/// 500 keeps top-20 under ~4% of the corpus, which is the point at which the
+/// arms are actually choosing. Below it a repository is still reported — the
+/// row is real — but it is excluded from the distribution, because a quartile
+/// computed over non-discriminating repositories describes nothing.
+pub const MIN_DISCRIMINATING_SYMBOLS: usize = 500;
 
 /// Quartiles of a metric across repositories.
 #[derive(Debug, Clone, Copy)]
@@ -88,11 +111,19 @@ impl ScaleReport {
     /// Quartiles rather than a mean: recall across repositories of different
     /// size and language is not a quantity a mean describes, and the spread is
     /// the actual finding.
+    /// Computed over *discriminating* repositories only — see
+    /// [`MIN_DISCRIMINATING_SYMBOLS`]. Including trivially small ones inflates
+    /// every quantile toward 100% and flatters the result.
     pub fn spread(&self, f: impl Fn(&RepoResult) -> f32) -> Option<Spread> {
-        if self.repos.is_empty() {
+        let mut v: Vec<f32> = self
+            .repos
+            .iter()
+            .filter(|r| r.is_discriminating())
+            .map(f)
+            .collect();
+        if v.is_empty() {
             return None;
         }
-        let mut v: Vec<f32> = self.repos.iter().map(f).collect();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let at = |q: f64| v[(((v.len() - 1) as f64) * q).round() as usize];
         Some(Spread {
@@ -102,6 +133,11 @@ impl ScaleReport {
             p75: at(0.75),
             max: v[v.len() - 1],
         })
+    }
+
+    /// Repositories large enough to discriminate.
+    pub fn discriminating(&self) -> impl Iterator<Item = &RepoResult> {
+        self.repos.iter().filter(|r| r.is_discriminating())
     }
 
     pub fn total_queries(&self) -> usize {
@@ -223,8 +259,9 @@ pub fn format_scale(r: &ScaleReport) -> String {
     );
     for x in &r.repos {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {:.0}% | {:.0}% | −{:.0}pp | {:.0}% | {:.0}% |\n",
+            "| {}{} | {} | {} | {} | {:.0}% | {:.0}% | −{:.0}pp | {:.0}% | {:.0}% |\n",
             x.name,
+            if x.is_discriminating() { "" } else { " ᵗ" },
             x.files,
             x.symbols,
             x.queries,
@@ -251,7 +288,21 @@ pub fn format_scale(r: &ScaleReport) -> String {
         }
     };
 
-    out.push_str("\n## distribution across repositories\n\n");
+    let n_disc = r.discriminating().count();
+    let n_tiny = r.repos.len() - n_disc;
+    if n_tiny > 0 {
+        out.push_str(&format!(
+            "\nᵗ {n_tiny} repositories have fewer than {MIN_DISCRIMINATING_SYMBOLS} symbols. \
+             At that size top-`k` reaches most of the corpus, so they score ~100% \
+             regardless of ranking quality. Their rows are shown but they are \
+             **excluded from the distribution below** — including them pulls every \
+             quantile toward 100% and flatters the result.\n"
+        ));
+    }
+
+    out.push_str(&format!(
+        "\n## distribution across the {n_disc} discriminating repositories\n\n"
+    ));
     out.push_str("| metric | min | p25 | median | p75 | max |\n|---|---|---|---|---|---|\n");
     out.push_str(&row("symbol recall", r.spread(|x| x.symbol_peak)));
     out.push_str(&row("whole-file recall", r.spread(|x| x.whole_file_peak)));
@@ -285,10 +336,14 @@ mod tests {
     use super::*;
 
     fn repo(name: &str, sym: f32, wf: f32) -> RepoResult {
+        sized(name, sym, wf, MIN_DISCRIMINATING_SYMBOLS)
+    }
+
+    fn sized(name: &str, sym: f32, wf: f32, symbols: usize) -> RepoResult {
         RepoResult {
             name: name.into(),
             files: 1,
-            symbols: 1,
+            symbols,
             queries: 1,
             symbol_peak: sym,
             whole_file_peak: wf,
@@ -317,6 +372,41 @@ mod tests {
         let s = rep.spread(|x| x.symbol_peak).unwrap();
         assert!((s.min - 0.2).abs() < 1e-6);
         assert!((s.max - 0.8).abs() < 1e-6);
+    }
+
+    /// The bug this floor exists to fix, pinned. Measured live: four of nine
+    /// repositories were small enough to score 100%/100%, which pulled p75 and
+    /// max of every metric to 100% and made the suite look better than it was.
+    #[test]
+    fn tiny_repositories_do_not_inflate_the_distribution() {
+        let rep = ScaleReport {
+            repos: vec![
+                sized("real-a", 0.45, 0.85, 1154),
+                sized("real-b", 0.55, 0.65, 20992),
+                // Two symbols. Top-20 reaches everything; 100% is arithmetic,
+                // not retrieval quality.
+                sized("toy-a", 1.0, 1.0, 2),
+                sized("toy-b", 1.0, 1.0, 49),
+            ],
+            ..Default::default()
+        };
+        let s = rep.spread(|x| x.symbol_peak).unwrap();
+        assert!(
+            s.max <= 0.55 + 1e-6,
+            "a toy repo leaked into the distribution: max={}",
+            s.max
+        );
+        assert_eq!(rep.discriminating().count(), 2);
+    }
+
+    #[test]
+    fn a_suite_of_only_tiny_repositories_reports_no_distribution() {
+        // Better than a confident 100% computed over nothing meaningful.
+        let rep = ScaleReport {
+            repos: vec![sized("toy", 1.0, 1.0, 3)],
+            ..Default::default()
+        };
+        assert!(rep.spread(|x| x.symbol_peak).is_none());
     }
 
     #[test]
