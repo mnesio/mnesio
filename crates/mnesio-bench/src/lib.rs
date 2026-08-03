@@ -41,6 +41,7 @@ pub mod fetch;
 pub mod gen;
 pub mod gitsuite;
 pub mod kveval;
+pub mod learncurve;
 pub mod memeval;
 pub mod qaeval;
 pub mod report;
