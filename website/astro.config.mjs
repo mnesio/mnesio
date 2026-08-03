@@ -118,6 +118,7 @@ export default defineConfig({
           label: "Guides",
           items: [
             { label: "Agent integration (MCP)", slug: "guides/integration" },
+            { label: "Code memory", slug: "guides/code-memory" },
             { label: "OpenClaw & Hermes", slug: "guides/openclaw-hermes" },
             { label: "KV cartridges (GPU)", slug: "guides/kv-cartridges" },
           ],

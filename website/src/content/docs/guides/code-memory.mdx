@@ -1,0 +1,164 @@
+---
+title: Code memory
+description: Retrieve the few symbols a task needs instead of whole files — and record whether the retrieval actually helped.
+---
+
+import { Card, CardGrid, Aside, Steps } from '@astrojs/starlight/components';
+
+An agent editing your codebase reads whole files to find a few functions. Most
+of those tokens are wasted, and on a large repository the file it needs will
+not fit at all.
+
+mnesio indexes a repository into **symbols** — functions, classes, types — and
+returns only the ones a task needs, packed to a hard token ceiling.
+
+<Aside type="tip" title="The part nobody else does">
+Every code-memory tool ranks code by how relevant it *looks*. mnesio also
+records what happened **after** the agent used it — did it build, did tests
+pass, was the change accepted — so retrieval can improve on evidence rather
+than on a heuristic somebody tuned once.
+</Aside>
+
+## Set it up
+
+<Steps>
+
+1. **Build the server** with real grammars:
+
+   ```bash
+   cargo build --release -p mnesio-mcp --features tree-sitter
+   ```
+
+2. **Point your editor at it.** The same block works in Claude Code, Cursor,
+   Windsurf, Zed and Codex:
+
+   ```json
+   {
+     "mcpServers": {
+       "mnesio": { "command": "/absolute/path/to/mnesio-mcp" }
+     }
+   }
+   ```
+
+   GitHub Copilot's agent mode uses `.vscode/mcp.json` with a `servers` key
+   instead of `mcpServers`; the inner object is identical.
+
+3. **Ask for context** by describing the change, not by keywords —
+   *"make the retry backoff configurable"*. Retrieval was tuned against
+   task-shaped queries, so a sentence beats a keyword list.
+
+4. **Report what happened**, including failures:
+
+   ```json
+   { "task": "make the retry backoff configurable",
+     "repo": "/path/to/repo",
+     "result": "build_failed" }
+   ```
+
+</Steps>
+
+## What comes back
+
+Each symbol arrives with its path and **why it is there** — retrieval matched
+your task, or it was pulled in as a callee of something that did. An agent
+choosing what to edit needs to tell those apart.
+
+```text
+7 symbols, ~877 tokens (from an index of 101 symbols across 6 files).
+
+--- pack.rs · function · matched your task
+pub fn pack(seeds: &[MemoryRef], src: &dyn PackSource, cfg: PackConfig) -> PackedContext {
+```
+
+The budget is a **hard ceiling**, never exceeded. Symbols that do not fit whole
+degrade to their signature before being dropped.
+
+## Measured, including the parts that don't flatter us
+
+Tasks come from each repository's own git history — the query is a real commit
+subject a human wrote for other reasons, and the gold answer is the symbols
+that commit actually touched, per `git log -L`. Nobody wrote these queries for
+a benchmark.
+
+Across the five repositories large enough to discriminate (355 queries, 29,413
+symbols):
+
+| metric | min | p25 | median | p75 | max |
+|---|---|---|---|---|---|
+| symbol recall | 45% | 55% | **56%** | 60% | 62% |
+| whole-file recall | 65% | 85% | **85%** | 89% | 93% |
+| ceiling gap | 10pp | 23pp | **33pp** | 33pp | 40pp |
+
+<Aside type="caution" title="Read the third row">
+Given unlimited context, reading whole files finds more. The median gap is
+**33 percentage points**, and we publish it because a token-saving number
+without its ceiling is not a result — it is an advert.
+
+What symbol retrieval buys is that it **degrades gracefully**. On the largest
+repository measured (llama_index, 3,830 files) whole-file collapses to 65%
+because files stop fitting, while symbol retrieval holds 55% — the gap narrows
+to 10pp precisely where whole-file stops being affordable.
+</Aside>
+
+Two more findings we would rather not need to state:
+
+- **31% of misses are rankable** — the right symbol was retrievable but ranked
+  too low. Headroom we have not converted yet.
+- **Up to 9% are unreachable by any ranking**: the task shares no vocabulary
+  with the code it touched. No scoring change reaches those.
+
+Reproduce it yourself:
+
+```bash
+cargo run --release -p mnesio-bench -- scaleeval --root ~/your-repos
+```
+
+## How it stays correct while you edit
+
+<CardGrid>
+  <Card title="Freshness is automatic" icon="approve-check">
+    Every call checks the tree before answering. Edits are picked up without a
+    flag, because an agent handed the version from before its own edit is the
+    worst failure this tool has — and a silent one.
+  </Card>
+  <Card title="Only changed code is re-embedded" icon="rocket">
+    Vectors are keyed by content hash, so a one-function edit in a
+    5,000-symbol repository costs one embedding, not five thousand. A function
+    that moves between files keeps its vector.
+  </Card>
+  <Card title="Restarts are warm" icon="seti:db">
+    Embeddings persist across restarts. A cache from a different embedding
+    model is refused rather than mixed, because that failure degrades
+    retrieval silently.
+  </Card>
+  <Card title="Repositories are isolated" icon="seti:lock">
+    Each repository is a `Scope`. Cross-scope reads return nothing — enforced,
+    not documented.
+  </Card>
+</CardGrid>
+
+## Languages
+
+30 with `--features tree-sitter`; six in a dependency-free build.
+
+`rust` `python` `javascript` `typescript` `tsx` `go` `java` `c` `c++` `c#`
+`ruby` `php` `swift` `kotlin` `scala` `lua` `elixir` `ocaml` `r` `dart`
+`solidity` `elm` `zig` `haskell` `julia` `objc` `hcl/terraform` `bash`
+
+Every one is verified by a test that extracts a real symbol from real source.
+Languages whose grammar ships no usable tag query are **not listed**, because a
+language that silently indexes zero symbols is worse than one we never claimed.
+
+## Known limits
+
+Stated here rather than left to be discovered:
+
+- **Rebuild is whole-index.** Only embedding is incremental; parsing and view
+  construction redo everything. Seconds on a large repository, not
+  milliseconds.
+- **The freshness check scales with file count.** ~2 ms on a few hundred
+  files, **~110 ms on 3,841**. A real per-query cost on a monorepo.
+- **Call-edge resolution is 23–46%** without type information, so graph
+  expansion misses real edges.
+- **The learning loop is half-built.** Outcomes are recorded today; compiling
+  them into gated retrieval rules is the next phase.
