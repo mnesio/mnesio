@@ -31,6 +31,7 @@ mnesio-core.workspace = true
 # mnesio-index depends only on mnesio-core.
 mnesio-index.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 tracing.workspace = true
 tree-sitter = { version = "0.25", optional = true }
 tree-sitter-bash = { version = "0.25.1", optional = true }

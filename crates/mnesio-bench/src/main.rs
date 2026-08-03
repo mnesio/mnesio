@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         Command::Compare(opts) => cmd_compare(opts).await,
         Command::MemEval(opts) => cmd_memeval(opts).await,
         Command::CodeEval(opts) => cmd_codeeval(opts).await,
+        Command::ScaleEval(opts) => cmd_scaleeval(opts).await,
         Command::Scale(opts) => cmd_scale(opts).await,
         Command::Compete(opts) => cmd_compete(opts).await,
         Command::QaEval(opts) => cmd_qaeval(opts).await,
@@ -1137,6 +1138,7 @@ enum Command {
     Compare(CompareOpts),
     MemEval(MemEvalOpts),
     CodeEval(CodeEvalOpts),
+    ScaleEval(ScaleEvalOpts),
     Scale(ScaleOpts),
     Compete(CompeteOpts),
     QaEval(QaEvalOpts),
@@ -1274,6 +1276,10 @@ fn parse_args() -> Result<RootArgs> {
             iter.next();
             "codeeval"
         }
+        Some("scaleeval") => {
+            iter.next();
+            "scaleeval"
+        }
         Some("scale") => {
             iter.next();
             "scale"
@@ -1316,6 +1322,9 @@ fn parse_args() -> Result<RootArgs> {
         }),
         "codeeval" => Ok(RootArgs {
             command: Command::CodeEval(parse_codeeval(iter)?),
+        }),
+        "scaleeval" => Ok(RootArgs {
+            command: Command::ScaleEval(parse_scaleeval(iter)?),
         }),
         "memeval" => Ok(RootArgs {
             command: Command::MemEval(parse_memeval(iter)?),
@@ -1546,6 +1555,77 @@ fn parse_codeeval(
     Ok(opts)
 }
 
+/// Options for the Phase-18H multi-repository suite.
+struct ScaleEvalOpts {
+    /// Directory containing repositories, one per subdirectory.
+    root: String,
+    ks: Vec<usize>,
+    embedder: String,
+    /// Cap on queries per repository, so one large history cannot dominate
+    /// the distribution.
+    per_repo: usize,
+    out: Option<String>,
+}
+
+fn parse_scaleeval(
+    mut iter: std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<ScaleEvalOpts> {
+    let mut opts = ScaleEvalOpts {
+        root: ".".into(),
+        ks: vec![1, 5, 20],
+        embedder: "fastembed".into(),
+        per_repo: 200,
+        out: None,
+    };
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--root" => opts.root = next_value(&mut iter, "--root")?,
+            "--k" => {
+                opts.ks = next_value(&mut iter, "--k")?
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            "--embedder" => opts.embedder = next_value(&mut iter, "--embedder")?,
+            "--per-repo" => opts.per_repo = next_value(&mut iter, "--per-repo")?.parse()?,
+            "--out" => opts.out = Some(next_value(&mut iter, "--out")?),
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => bail!("unknown argument {other:?}; pass --help for usage"),
+        }
+    }
+    Ok(opts)
+}
+
+async fn cmd_scaleeval(opts: ScaleEvalOpts) -> Result<()> {
+    use mnesio_bench::scaleeval::{discover_repos, format_scale, run_scale};
+
+    let repos = discover_repos(std::path::Path::new(&opts.root));
+    if repos.is_empty() {
+        bail!("no git repositories directly under {}", opts.root);
+    }
+    eprintln!(
+        "# mnesio-bench scaleeval · {} repos under {} · k={:?} · embedder={}",
+        repos.len(),
+        opts.root,
+        opts.ks,
+        opts.embedder
+    );
+
+    let report = run_scale(&repos, &opts.ks, &opts.embedder, opts.per_repo).await?;
+    let text = format_scale(&report);
+    match &opts.out {
+        Some(path) => {
+            std::fs::write(path, &text)?;
+            eprintln!("# wrote {path}");
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
 async fn cmd_codeeval(opts: CodeEvalOpts) -> Result<()> {
     use mnesio_bench::codeeval::{
         self, format_report, hand_written_suite, run_codeeval, trace_targets,
@@ -1767,6 +1847,8 @@ fn print_help() {
          \x20\x20             (default — invoked when no subcommand is given)\n\
          \x20\x20compare    A vs B evaluation of two artifact bodies against a fixed suite\n\
          \x20\x20memeval    memory recall@k over the real ingest→retrieve path\n\
+         \x20\x20scaleeval  Phase-18H: codeeval across every git repo under a root,\n\
+         \x20\x20             reported as a distribution rather than one average\n\
          \x20\x20codeeval   Phase-17B code retrieval: whole-file vs. symbol vs. symbol+\n\
          \x20\x20             graph-expansion, paired on one index (recall + token cost)\n\
          \x20\x20scale      large-scale load test: throughput + latency percentiles + recall\n\

@@ -328,11 +328,17 @@ impl CodeMemory {
     ) -> Result<Self, MnesioError> {
         let root = root.as_ref().to_path_buf();
         let parsed = parse_tree(&root)?;
+        // A warm start costs a disk read; a cold one costs an embedding per
+        // symbol. On a large repository that is the difference between an
+        // editor answering immediately and stalling for minutes.
+        let embeddings = crate::persist::load(&root, embedder.model_id(), embedder.dim())
+            .map(|c| c.vectors().clone())
+            .unwrap_or_default();
         let mut me = Self {
             root,
             scope,
             embedder,
-            embeddings: HashMap::new(),
+            embeddings,
             retriever: None,
             symbols: HashMap::new(),
             links: HashMap::new(),
@@ -444,6 +450,16 @@ impl CodeMemory {
         // Drop vectors for code that no longer exists, or the cache grows
         // without bound across a long editing session.
         self.embeddings = fresh;
+        // Persist before the views, so a crash during view construction still
+        // leaves the expensive half done. A write failure is logged and
+        // swallowed: a cache we could not save costs a slow next start, never
+        // a failed index.
+        let mut cache =
+            crate::persist::EmbeddingCache::new(self.embedder.model_id(), self.embedder.dim());
+        cache.replace(self.embeddings.clone());
+        if let Err(e) = crate::persist::store(&self.root, &cache) {
+            tracing::warn!(error = %e, "could not persist code embeddings");
+        }
         // See the module docs: every one of these is a measured setting.
         self.retriever = Some(
             HybridRetriever::new(vector, bm25.clone(), Arc::clone(&self.embedder))
@@ -629,6 +645,41 @@ mod tests {
 
     fn embedder() -> Arc<dyn Embedder> {
         Arc::new(MockEmbedder::new(32))
+    }
+
+    /// Embedder that records how many texts it was asked to embed.
+    ///
+    /// The only way to prove a cache is working: correctness tests pass
+    /// whether or not the vector was reused, so the assertion has to be about
+    /// the work avoided.
+    struct CountingEmbedder {
+        calls: std::sync::atomic::AtomicUsize,
+        inner: MockEmbedder,
+    }
+    impl CountingEmbedder {
+        fn new() -> Self {
+            Self {
+                calls: Default::default(),
+                inner: MockEmbedder::new(32),
+            }
+        }
+        fn count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    #[async_trait::async_trait]
+    impl Embedder for CountingEmbedder {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, MnesioError> {
+            self.calls
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            self.inner.embed(texts).await
+        }
+        fn dim(&self) -> usize {
+            self.inner.dim()
+        }
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
     }
 
     #[tokio::test]
@@ -846,6 +897,46 @@ mod tests {
             added <= 2,
             "re-embedded {added} texts for a one-symbol change — the cache is not working"
         );
+    }
+
+    /// A restart must be warm. Simulated by dropping the index and building a
+    /// fresh one over the same tree with a counting embedder: if persistence
+    /// works, the second build embeds nothing.
+    #[tokio::test]
+    async fn a_restart_reuses_persisted_embeddings() {
+        let cache_dir = std::env::temp_dir().join(format!("mnesio-restart-{}", new_id()));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::env::set_var("MNESIO_CACHE_DIR", &cache_dir);
+
+        let counting = Arc::new(CountingEmbedder::new());
+        let repo = TempRepo::new(&[("src/a.rs", "pub fn persisted() {}\n")]);
+
+        let first = CodeMemory::index(&repo.0, Scope::global("t"), counting.clone())
+            .await
+            .unwrap();
+        let after_first = counting.count();
+        assert!(after_first >= 1, "first build must embed");
+        drop(first);
+
+        // "Restart": a brand-new index over the same tree.
+        let second = CodeMemory::index(&repo.0, Scope::global("t"), counting.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            counting.count(),
+            after_first,
+            "restart re-embedded; the cache is not being read"
+        );
+        assert!(second
+            .context_for("persisted", 4000)
+            .await
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.name == "persisted"));
+
+        std::env::remove_var("MNESIO_CACHE_DIR");
+        std::fs::remove_dir_all(&cache_dir).ok();
     }
 
     #[tokio::test]

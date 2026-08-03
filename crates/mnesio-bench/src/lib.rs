@@ -45,6 +45,7 @@ pub mod memeval;
 pub mod qaeval;
 pub mod report;
 pub mod scale;
+pub mod scaleeval;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

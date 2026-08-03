@@ -42,6 +42,7 @@ pub mod pack;
 pub mod parse;
 #[cfg(feature = "tree-sitter")]
 pub mod parse_ts;
+pub mod persist;
 
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
 pub use memory::{CodeContext, CodeHit, CodeMemory};
@@ -49,6 +50,7 @@ pub use pack::{pack, Form, PackConfig, PackSource, PackedContext, PackedSymbol, 
 pub use parse::{CodeParser, HeuristicParser, ParseError};
 #[cfg(feature = "tree-sitter")]
 pub use parse_ts::TreeSitterParser;
+pub use persist::EmbeddingCache;
 
 use serde::{Deserialize, Serialize};
 
