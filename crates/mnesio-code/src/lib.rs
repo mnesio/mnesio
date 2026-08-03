@@ -37,6 +37,7 @@
 //!   run on. Real grammars land behind the `tree-sitter` feature.
 
 pub mod index;
+pub mod learn;
 pub mod memory;
 pub mod outcome;
 pub mod pack;
@@ -46,6 +47,7 @@ pub mod parse_ts;
 pub mod persist;
 
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
+pub use learn::{LearnConfig, RuleProposal, SymbolLedger};
 pub use memory::{CodeContext, CodeHit, CodeMemory};
 pub use outcome::{AttributedSymbol, Attribution, CodeOutcome, DecisionEvidence, EditResult};
 pub use pack::{pack, Form, PackConfig, PackSource, PackedContext, PackedSymbol, Reason};
