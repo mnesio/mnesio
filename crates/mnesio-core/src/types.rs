@@ -109,7 +109,15 @@ impl Scope {
 /// Typed references — newtypes so the compiler stops us mixing id kinds.
 macro_rules! id_ref {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        // `Ord` is derived because [`Id`] is a ULID, whose ordering *is* its
+        // point: ids sort by creation time. Without it every caller that needs
+        // a deterministic iteration order — graph colouring, replay, any
+        // tie-break — has to reach through to `.0`, and one that forgets gets
+        // hash order instead, which differs between runs and turns a stable
+        // output into an intermittently-changing one.
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         pub struct $name(pub Id);
         impl From<Id> for $name {
             fn from(id: Id) -> Self {

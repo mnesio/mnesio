@@ -1632,6 +1632,15 @@ pub async fn dashboard_html() -> Response {
     no_cache(Html(include_str!("dashboard.html")).into_response())
 }
 
+/// `GET /code-graph` — the repository, drawn.
+///
+/// Its own page rather than a dashboard panel: a force simulation wants the
+/// whole viewport and its own pan/zoom, and squeezing one into a scrolling
+/// column of KPI cards produces something too small to read.
+pub async fn code_graph_html() -> Response {
+    no_cache(Html(include_str!("codegraph.html")).into_response())
+}
+
 /// `GET /static/chart.umd.min.js` — vendored Chart.js bundle. Served
 /// locally so the dashboard doesn't depend on any third-party CDN at
 /// runtime: a flaky network or a CDN going dark would otherwise break

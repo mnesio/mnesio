@@ -209,7 +209,7 @@ impl CodeIndexer {
                 let Some(from) = by_key.get(&edge.from).copied() else {
                     continue;
                 };
-                match resolve(&by_name, &edge.to_name, &file.path) {
+                match resolve(&by_name, &edge.to_name, &file.path, edge.via_receiver) {
                     Resolution::One(to) if to != from => {
                         let entry = links.entry(from).or_default();
                         if !entry.contains(&to) {
@@ -309,12 +309,22 @@ enum Resolution {
 ///
 /// 1. A symbol of that name **in the calling file** wins — the common case, and
 ///    the one most likely to be right without type information.
-/// 2. Otherwise, a **unique** match across the indexed set.
+/// 2. Otherwise, a **unique** match across the indexed set — but only for a
+///    *bare* call. See `via_receiver`.
 /// 3. Otherwise give up. No heuristic tie-break.
+///
+/// `via_receiver` says the call site was `x.name(..)` or `T::name(..)`. Rule 2
+/// is then withheld, because "unique in the repository" is not evidence about
+/// a method: `vec.push(x)` is uniquely matched by any lone free function named
+/// `push`, and binds to it. Measured on this workspace that single case gave
+/// `push` 142 inbound edges and the top slot in "most depended on" — a wrong
+/// edge that also drags an unrelated function into context expansion, which is
+/// exactly the failure this function's conservatism exists to avoid.
 fn resolve(
     by_name: &HashMap<&str, Vec<(&str, MemoryRef)>>,
     name: &str,
     from_path: &str,
+    via_receiver: bool,
 ) -> Resolution {
     let Some(candidates) = by_name.get(name) else {
         return Resolution::None;
@@ -326,11 +336,30 @@ fn resolve(
     if local.len() == 1 {
         return Resolution::One(local[0].1);
     }
+    // A receiver call with no same-file definition is left unresolved rather
+    // than bound to a coincidental name match in another file.
+    //
+    // Toggleable only so the change could be measured *paired* — both arms
+    // running identical code against one suite, per the standing rule that an
+    // unpaired A/B lets index randomness masquerade as an effect. The strict
+    // behaviour is the default; the escape hatch exists for the benchmark and
+    // for anyone who wants to reproduce the comparison.
+    if via_receiver && !bare_name_fallback() {
+        return Resolution::None;
+    }
     match candidates.len() {
         0 => Resolution::None,
         1 => Resolution::One(candidates[0].1),
         _ => Resolution::Ambiguous,
     }
+}
+
+/// Restore pre-18 behaviour: bind a receiver call to a unique same-named
+/// symbol anywhere in the repository. Off unless `MNESIO_CODE_BARE_NAME=1`.
+fn bare_name_fallback() -> bool {
+    std::env::var("MNESIO_CODE_BARE_NAME")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

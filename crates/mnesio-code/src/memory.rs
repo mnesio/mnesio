@@ -558,6 +558,49 @@ impl CodeMemory {
     }
 }
 
+/// The call graph `CodeMemory` already maintains, made available to look at.
+///
+/// `links` has existed since 17A as the input to 1-hop context expansion; it
+/// was simply never readable as a whole. Exposing it is a projection, not new
+/// state — there is no second copy to fall out of sync with what the packer
+/// walks, so the picture and the retrieval can never disagree.
+impl crate::graph::GraphSource for CodeMemory {
+    fn symbols(&self) -> Vec<(MemoryRef, String, String, SymbolKind)> {
+        self.symbols
+            .iter()
+            .map(|(m, s)| (*m, s.name.clone(), s.path.clone(), s.kind))
+            .collect()
+    }
+
+    fn callees(&self, of: MemoryRef) -> Vec<MemoryRef> {
+        self.links.get(&of).cloned().unwrap_or_default()
+    }
+
+    fn resolution(&self) -> crate::graph::Resolution {
+        let e = &self.stats.edges;
+        crate::graph::Resolution {
+            // Ambiguous call sites count as *seen*. They were found and
+            // deliberately dropped rather than guessed, so excluding them
+            // would flatter the resolution rate by hiding the cases the
+            // resolver handled least well.
+            seen: e.resolved + e.unresolved + e.ambiguous,
+            resolved: e.resolved,
+        }
+    }
+}
+
+impl CodeMemory {
+    /// This repository as a graph, coloured by whatever outcomes have been
+    /// recorded for it.
+    pub fn graph(
+        &self,
+        journal: &[crate::journal::JournalEntry],
+        cfg: crate::graph::GraphConfig,
+    ) -> crate::graph::CodeGraph {
+        crate::graph::CodeGraph::build(self, journal, cfg)
+    }
+}
+
 impl PackSource for CodeMemory {
     fn text(&self, m: MemoryRef) -> Option<&str> {
         self.symbols.get(&m).map(|s| s.text.as_str())

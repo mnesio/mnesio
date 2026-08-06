@@ -156,11 +156,12 @@ impl CodeParser for HeuristicParser {
             // (`fn append(..);`) both look like calls but are definitions.
             // Caught by running this over mnesio's own source.
             if has_executable_body(symbol.kind) {
-                for callee in call_names(&lines[i..=end], &symbol.name) {
+                for (callee, via_receiver) in call_names(&lines[i..=end], &symbol.name) {
                     edges.push(CodeEdge {
                         from: symbol.key(),
                         to_name: callee,
                         kind: EdgeKind::Calls,
+                        via_receiver,
                     });
                 }
             }
@@ -393,11 +394,12 @@ fn parse_indented(path: &str, language: &str, source: &str) -> ParsedFile {
             text: lines[i..=end].join("\n"),
         };
         if has_executable_body(symbol.kind) {
-            for callee in call_names(&lines[i..=end], &symbol.name) {
+            for (callee, via_receiver) in call_names(&lines[i..=end], &symbol.name) {
                 edges.push(CodeEdge {
                     from: symbol.key(),
                     to_name: callee,
                     kind: EdgeKind::Calls,
+                    via_receiver,
                 });
             }
         }
@@ -548,8 +550,8 @@ fn preceded_by_test_attr(lines: &[&str], idx: usize) -> bool {
 }
 
 /// Identifiers that appear immediately before a `(` — i.e. probable calls.
-fn call_names(body: &[&str], self_name: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+fn call_names(body: &[&str], self_name: &str) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
 
     for line in body {
         let code = match line.find("//") {
@@ -566,13 +568,23 @@ fn call_names(body: &[&str], self_name: &str) -> Vec<String> {
                     s -= 1;
                 }
                 let name: String = bytes[s..idx].iter().collect();
+                // A `.` or `::` immediately before the identifier means the
+                // call has a receiver. We still cannot say what type it is —
+                // that needs inference — but "there was a receiver" is itself
+                // load-bearing: it is what separates `parse()` from
+                // `s.parse()`, and binding the second to a free function
+                // elsewhere in the repository is how `push` ended up looking
+                // like the most-depended-on symbol in the workspace.
+                let via_receiver = s > 0
+                    && (bytes[s - 1] == '.'
+                        || (s > 1 && bytes[s - 1] == ':' && bytes[s - 2] == ':'));
                 let is_call = !name.is_empty()
                     && !name.chars().next().unwrap().is_numeric()
                     && name != self_name
                     && !CALL_KEYWORDS.contains(&name.as_str())
-                    && !out.contains(&name);
+                    && !out.iter().any(|(n, _)| n == &name);
                 if is_call {
-                    out.push(name);
+                    out.push((name, via_receiver));
                 }
             }
             idx += 1;

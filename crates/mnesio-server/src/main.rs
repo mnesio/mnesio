@@ -314,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(viz::index_html))
         .route("/dashboard", get(viz::dashboard_html))
+        .route("/code-graph", get(viz::code_graph_html))
         .route("/api/snapshot", get(viz::snapshot))
         .route("/api/search", get(viz::search))
         .route("/api/metrics", get(viz::metrics_rollup))
@@ -335,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
         // user happens to have open in another tab. This one returns counts and
         // rates — no code, no paths, no symbol names — so the blast radius of
         // the allowance is a repository name and a success rate.
+        .route("/api/code/graph", get(code::code_graph))
         .route(
             "/api/code/curve",
             get(code::code_curve).layer(

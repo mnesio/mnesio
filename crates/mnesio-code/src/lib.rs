@@ -37,6 +37,7 @@
 //!   run on. Real grammars land behind the `tree-sitter` feature.
 
 pub mod curve;
+pub mod graph;
 pub mod index;
 pub mod journal;
 pub mod learn;
@@ -49,6 +50,7 @@ pub mod parse_ts;
 pub mod persist;
 
 pub use curve::{CurvePoint, LiveCurve};
+pub use graph::{CodeGraph, GraphConfig, GraphEdge, GraphNode, GraphSource, NodeEvidence};
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
 pub use journal::{JournalEntry, JournalRead, OutcomeJournal};
 pub use learn::{LearnConfig, RuleProposal, SymbolLedger};
@@ -185,6 +187,16 @@ pub struct CodeEdge {
     /// Bare name of the target, as written at the call/use site.
     pub to_name: String,
     pub kind: EdgeKind,
+    /// The call site was `x.name(..)` or `T::name(..)`, not a bare `name(..)`.
+    ///
+    /// The parser cannot type `x`, so it cannot say *which* `name` this is —
+    /// but it can see that there was a receiver, and that is enough to know
+    /// the call is very unlikely to be a free function defined in some other
+    /// file. Without this distinction `vec.push(x)` binds to any lone function
+    /// called `push` in the repository: measured on this workspace, that gave
+    /// `push` 142 inbound edges and made it the top "most depended on" symbol,
+    /// which is an artefact rather than a fact about the code.
+    pub via_receiver: bool,
 }
 
 /// Everything one file contributed to the index.
