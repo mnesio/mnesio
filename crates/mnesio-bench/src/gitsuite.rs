@@ -133,6 +133,40 @@ mod trace_cache {
     }
 }
 
+/// Walk up from `dir` to the enclosing repository, returning it and `dir`'s
+/// path relative to it.
+///
+/// The prefix matters: `git log -L a,b:path` resolves `path` from the
+/// repository root, so a target discovered under `serde/src` must be traced as
+/// `serde/src/...`. Getting this wrong does not error — git simply finds no
+/// history for a path that does not exist, and the suite comes back empty,
+/// which is indistinguishable from "this repository has no descriptive
+/// commits". That silence is why this is resolved once, here.
+fn git_root_and_prefix(dir: &str) -> Result<(String, String)> {
+    let start = std::path::Path::new(dir)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(dir));
+    let mut cur = start.as_path();
+    loop {
+        if cur.join(".git").exists() {
+            let prefix = start
+                .strip_prefix(cur)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            return Ok((cur.to_string_lossy().into_owned(), prefix));
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => {
+                return Err(anyhow!(
+                    "{dir} is not inside a git repository — the git suite needs \
+                     history to derive queries from"
+                ))
+            }
+        }
+    }
+}
+
 /// The repository's current HEAD, which is what makes a cached trace valid.
 ///
 /// `None` when git won't say — a detached or empty repository. Callers then
@@ -162,7 +196,7 @@ const MIN_SUBJECT_CHARS: usize = 25;
 
 /// How far back to trace each symbol's line range. Bounds a `git log -L` that
 /// would otherwise walk the whole history of a long-lived file.
-const HISTORY_DEPTH: usize = 30;
+pub(crate) const HISTORY_DEPTH: usize = 30;
 
 /// A symbol to trace: where it lives now, and what it is called.
 #[derive(Debug, Clone)]
@@ -259,12 +293,27 @@ fn usable_subject(subject: &str) -> bool {
 ///
 /// `limit` caps the returned queries.
 pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<CodeQuery>> {
-    if !std::path::Path::new(repo).join(".git").exists() {
-        return Err(anyhow!(
-            "{repo} is not a git repository — the git suite needs history to \
-             derive queries from"
-        ));
-    }
+    // `repo` may be a subdirectory — a manifest corpus indexes `serde/src`,
+    // not the whole checkout. Git only answers from the repository root, and
+    // `-L` paths must be root-relative, so resolve both here rather than
+    // making every caller do it. Passing a subdir used to fail with "not a git
+    // repository", which reads as a broken checkout rather than a path that
+    // simply needed rebasing.
+    let (repo, prefix) = git_root_and_prefix(repo)?;
+    let rebased: Vec<TraceTarget>;
+    let targets = if prefix.is_empty() {
+        targets
+    } else {
+        rebased = targets
+            .iter()
+            .map(|t| TraceTarget {
+                path: format!("{prefix}/{}", t.path),
+                ..t.clone()
+            })
+            .collect();
+        &rebased
+    };
+    let repo = repo.as_str();
 
     // Memoise the per-symbol traces against this HEAD. See [`trace_cache`] for
     // why the answers are cached rather than the calls being batched — batching

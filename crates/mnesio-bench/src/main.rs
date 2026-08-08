@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
         Command::MemEval(opts) => cmd_memeval(opts).await,
         Command::CodeEval(opts) => cmd_codeeval(opts).await,
         Command::ScaleEval(opts) => cmd_scaleeval(opts).await,
+        Command::Manifest(opts) => cmd_manifest(opts).await,
         Command::Scale(opts) => cmd_scale(opts).await,
         Command::Compete(opts) => cmd_compete(opts).await,
         Command::QaEval(opts) => cmd_qaeval(opts).await,
@@ -1139,6 +1140,7 @@ enum Command {
     MemEval(MemEvalOpts),
     CodeEval(CodeEvalOpts),
     ScaleEval(ScaleEvalOpts),
+    Manifest(ManifestOpts),
     Scale(ScaleOpts),
     Compete(CompeteOpts),
     QaEval(QaEvalOpts),
@@ -1296,6 +1298,10 @@ fn parse_args() -> Result<RootArgs> {
             iter.next();
             "kveval"
         }
+        Some("manifest") => {
+            iter.next();
+            "manifest"
+        }
         Some("edge") => {
             iter.next();
             "edge"
@@ -1325,6 +1331,9 @@ fn parse_args() -> Result<RootArgs> {
         }),
         "scaleeval" => Ok(RootArgs {
             command: Command::ScaleEval(parse_scaleeval(iter)?),
+        }),
+        "manifest" => Ok(RootArgs {
+            command: Command::Manifest(parse_manifest(iter)?),
         }),
         "memeval" => Ok(RootArgs {
             command: Command::MemEval(parse_memeval(iter)?),
@@ -1597,6 +1606,167 @@ fn parse_scaleeval(
         }
     }
     Ok(opts)
+}
+
+/// `manifest` — the Phase-18H reproducible corpus.
+struct ManifestOpts {
+    /// `pin` resolves commit shas; `run` executes the corpus.
+    action: String,
+    /// Manifest path. `None` uses the one compiled into the binary.
+    path: Option<String>,
+    /// Where `pin` writes the resolved manifest.
+    out: Option<String>,
+    /// Where checkouts live between runs.
+    work: String,
+    ks: Vec<usize>,
+    embedder: String,
+}
+
+fn parse_manifest(
+    mut iter: std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<ManifestOpts> {
+    let action = iter
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("manifest needs an action: pin | run"))?;
+    if action != "pin" && action != "run" {
+        bail!("unknown manifest action {action:?}; expected pin or run");
+    }
+    let mut o = ManifestOpts {
+        action,
+        path: None,
+        out: None,
+        work: format!(
+            "{}/mnesio-corpus",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
+        ),
+        ks: vec![1, 5, 20],
+        embedder: "fastembed".into(),
+    };
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--manifest" => o.path = Some(next_value(&mut iter, "--manifest")?),
+            "--out" => o.out = Some(next_value(&mut iter, "--out")?),
+            "--work" => o.work = next_value(&mut iter, "--work")?,
+            "--embedder" => o.embedder = next_value(&mut iter, "--embedder")?,
+            "--k" => {
+                o.ks = next_value(&mut iter, "--k")?
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => bail!("unknown argument {other:?}; pass --help for usage"),
+        }
+    }
+    Ok(o)
+}
+
+async fn cmd_manifest(opts: ManifestOpts) -> Result<()> {
+    use mnesio_bench::manifest::{admit, materialize, Manifest};
+    use mnesio_bench::scaleeval::{format_scale, run_scale};
+
+    let path = opts.path.as_ref().map(std::path::PathBuf::from);
+    let mut m = Manifest::load(path.as_deref())?;
+
+    if opts.action == "pin" {
+        let out = opts
+            .out
+            .clone()
+            .unwrap_or_else(|| "crates/mnesio-bench/manifest/codeeval-v1.pinned.json".into());
+        eprintln!(
+            "# resolving {} repositories against their remotes",
+            m.repos.len()
+        );
+        m.pin(std::path::Path::new(&out))?;
+        eprintln!("# wrote {out} — this file is the reproducible artifact");
+        return Ok(());
+    }
+
+    if !m.is_pinned() {
+        bail!(
+            "manifest {} is not pinned. Run `mnesio-bench manifest pin` first, \
+             then `manifest run --manifest <pinned>`. Numbers from an unpinned \
+             corpus are not reproducible, so the harness refuses rather than \
+             producing them.",
+            m.name
+        );
+    }
+
+    let work = std::path::PathBuf::from(&opts.work);
+    std::fs::create_dir_all(&work)?;
+    eprintln!(
+        "# mnesio-bench manifest run · {} · {} repos · budget {}s · work {}",
+        m.name,
+        m.repos.len(),
+        m.budget_seconds,
+        work.display()
+    );
+
+    // Fetch and admit before running anything, so a corpus that cannot be
+    // materialised fails in seconds rather than halfway through the suite.
+    let mut roots = Vec::new();
+    let mut refused: Vec<(String, String)> = Vec::new();
+    for spec in &m.repos {
+        match materialize(&work, spec) {
+            Ok(checkout) => match admit(&checkout, spec) {
+                Ok(root) => {
+                    eprintln!("  ok      {:<10} {}", spec.name, root.display());
+                    roots.push(root);
+                }
+                Err(why) => {
+                    eprintln!("  skip    {:<10} {why:?}", spec.name);
+                    refused.push((spec.name.clone(), format!("{why:?}")));
+                }
+            },
+            Err(e) => {
+                eprintln!("  fetch!  {:<10} {e}", spec.name);
+                refused.push((spec.name.clone(), format!("fetch failed: {e}")));
+            }
+        }
+    }
+    if roots.is_empty() {
+        bail!("no repository in {} could be materialised", m.name);
+    }
+
+    let per_repo = m.repos.first().map(|r| r.queries).unwrap_or(60);
+    let started = std::time::Instant::now();
+    let report = run_scale(&roots, &opts.ks, &opts.embedder, per_repo).await?;
+    let elapsed = started.elapsed().as_secs();
+
+    let mut text = format_scale(&report);
+    text.push_str(&format!(
+        "\n## corpus\n\n\
+         manifest **{}**, {} repositories, {} evaluated, {} refused.\n\
+         wall clock **{elapsed}s** against a declared budget of {}s — {}.\n",
+        m.name,
+        m.repos.len(),
+        roots.len(),
+        refused.len(),
+        m.budget_seconds,
+        if elapsed <= m.budget_seconds {
+            "within budget"
+        } else {
+            "**OVER BUDGET**, the corpus has outgrown its declaration and should be re-capped"
+        }
+    ));
+    if !refused.is_empty() {
+        text.push_str("\nrefused, and why — never silently dropped:\n\n");
+        for (n, why) in &refused {
+            text.push_str(&format!("- `{n}` — {why}\n"));
+        }
+    }
+
+    match &opts.out {
+        Some(p) => {
+            std::fs::write(p, &text)?;
+            eprintln!("# wrote {p}");
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
 }
 
 async fn cmd_scaleeval(opts: ScaleEvalOpts) -> Result<()> {

@@ -236,6 +236,12 @@ pub async fn run_scale(
     }
 
     if report.repos.is_empty() {
+        // Print why before erroring. A bare count sends the reader hunting for
+        // a bug in whichever stage they guess first — which cost real time
+        // when a manifest corpus first failed here.
+        for (name, why) in &report.skipped {
+            eprintln!("  skipped {name}: {why}");
+        }
         return Err(anyhow!(
             "no repository produced a usable suite ({} skipped)",
             report.skipped.len()

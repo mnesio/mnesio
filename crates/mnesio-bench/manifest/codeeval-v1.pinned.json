@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "name": "codeeval-v1",
+  "description": "Reproducible code-retrieval corpus for Phase 18H. Public repositories only, pinned to exact commits, each size-capped so the whole suite runs inside a declared budget on a laptop. Replaces 'point it at whatever is in ~/Aniket', which was private, drifting, and unbounded — three attempts at it never finished.",
+  "budget_seconds": 2400,
+  "notes": [
+    "`pin` is null until `mnesio-bench manifest pin` resolves it. SHAs are never hand-written: an invented commit is a benchmark nobody can reproduce, which is the exact failure this file exists to prevent.",
+    "`max_files` is a hard guard, not a hint. A repository that exceeds it is SKIPPED and reported, never silently truncated — truncation would change the corpus without changing the manifest.",
+    "`subdir` narrows indexing to one part of a large repository. It is part of the corpus definition and must be identical for every re-run.",
+    "Sizes below are intentionally modest. The point is a suite a third party can re-run in under an hour, not the largest corpus we can name."
+  ],
+  "repos": [
+    {
+      "name": "ripgrep",
+      "url": "https://github.com/BurntSushi/ripgrep",
+      "language": "rust",
+      "subdir": "crates/core",
+      "max_files": 60,
+      "queries": 60,
+      "pin": "3fce3b5bb0236da2df6d99672afb8a719642eca7"
+    },
+    {
+      "name": "bytes",
+      "url": "https://github.com/tokio-rs/bytes",
+      "language": "rust",
+      "subdir": "src",
+      "max_files": 40,
+      "queries": 60,
+      "pin": "d5c8ad3227afe459c09f1d0d85455abf00f0381a"
+    },
+    {
+      "name": "serde",
+      "url": "https://github.com/serde-rs/serde",
+      "language": "rust",
+      "subdir": "serde/src",
+      "max_files": 80,
+      "queries": 60,
+      "pin": "747814f7d5fbab872df3b02f070c165b91bde062"
+    },
+    {
+      "name": "fd",
+      "url": "https://github.com/sharkdp/fd",
+      "language": "rust",
+      "subdir": "src",
+      "max_files": 40,
+      "queries": 60,
+      "pin": "0f1f9676dcf7bc5af814469a74a0d878449cde80"
+    },
+    {
+      "name": "requests",
+      "url": "https://github.com/psf/requests",
+      "language": "python",
+      "subdir": "src/requests",
+      "max_files": 40,
+      "queries": 60,
+      "pin": "1f6589ec3a1ee910f9a65cc3ceac60b26677bc0e"
+    },
+    {
+      "name": "flask",
+      "url": "https://github.com/pallets/flask",
+      "language": "python",
+      "subdir": "src/flask",
+      "max_files": 60,
+      "queries": 60,
+      "pin": "6a2f545bfd8ed31e19066a299296917e034aca58"
+    },
+    {
+      "name": "click",
+      "url": "https://github.com/pallets/click",
+      "language": "python",
+      "subdir": "src/click",
+      "max_files": 40,
+      "queries": 60,
+      "pin": "00e592cea702e0b2caa0dee42489fdb1c22cd845"
+    },
+    {
+      "name": "httpx",
+      "url": "https://github.com/encode/httpx",
+      "language": "python",
+      "subdir": "httpx",
+      "max_files": 40,
+      "queries": 60,
+      "pin": "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+    },
+    {
+      "name": "express",
+      "url": "https://github.com/expressjs/express",
+      "language": "javascript",
+      "subdir": "lib",
+      "max_files": 40,
+      "queries": 60,
+      "pin": "a3714473feb3d2908add734d340e7755fd85e0a3"
+    },
+    {
+      "name": "zod",
+      "url": "https://github.com/colinhacks/zod",
+      "language": "typescript",
+      "subdir": "packages/zod/src/v4/core",
+      "max_files": 80,
+      "queries": 60,
+      "pin": "912f0f51b0ced654d0069741e7160834dca742ee"
+    }
+  ]
+}
