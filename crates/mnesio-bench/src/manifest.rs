@@ -490,5 +490,4 @@ mod tests {
         std::fs::remove_file(&p).ok();
         assert!(e.contains("schema"), "got: {e}");
     }
-
 }

@@ -133,27 +133,18 @@ mod trace_cache {
     }
 }
 
-/// Walk up from `dir` to the enclosing repository, returning it and `dir`'s
-/// path relative to it.
+/// Walk up from `dir` to the enclosing repository.
 ///
-/// The prefix matters: `git log -L a,b:path` resolves `path` from the
-/// repository root, so a target discovered under `serde/src` must be traced as
-/// `serde/src/...`. Getting this wrong does not error — git simply finds no
-/// history for a path that does not exist, and the suite comes back empty,
-/// which is indistinguishable from "this repository has no descriptive
-/// commits". That silence is why this is resolved once, here.
-fn git_root_and_prefix(dir: &str) -> Result<(String, String)> {
+/// Git only answers from a repository root, so a corpus that indexes
+/// `serde/src` still has to run its `log` there.
+fn git_root(dir: &str) -> Result<String> {
     let start = std::path::Path::new(dir)
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(dir));
     let mut cur = start.as_path();
     loop {
         if cur.join(".git").exists() {
-            let prefix = start
-                .strip_prefix(cur)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            return Ok((cur.to_string_lossy().into_owned(), prefix));
+            return Ok(cur.to_string_lossy().into_owned());
         }
         match cur.parent() {
             Some(p) => cur = p,
@@ -294,25 +285,20 @@ fn usable_subject(subject: &str) -> bool {
 /// `limit` caps the returned queries.
 pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<CodeQuery>> {
     // `repo` may be a subdirectory — a manifest corpus indexes `serde/src`,
-    // not the whole checkout. Git only answers from the repository root, and
-    // `-L` paths must be root-relative, so resolve both here rather than
-    // making every caller do it. Passing a subdir used to fail with "not a git
-    // repository", which reads as a broken checkout rather than a path that
-    // simply needed rebasing.
-    let (repo, prefix) = git_root_and_prefix(repo)?;
-    let rebased: Vec<TraceTarget>;
-    let targets = if prefix.is_empty() {
-        targets
-    } else {
-        rebased = targets
-            .iter()
-            .map(|t| TraceTarget {
-                path: format!("{prefix}/{}", t.path),
-                ..t.clone()
-            })
-            .collect();
-        &rebased
-    };
+    // not the whole checkout — and git only answers from the repository root.
+    // So resolve the root here rather than making every caller do it; passing
+    // a subdir used to fail with "not a git repository", which reads as a
+    // broken checkout rather than a path that just needed resolving.
+    //
+    // Paths are deliberately NOT rebased. [`crate::codeeval::trace_targets`]
+    // already keys every target off `git_root`, so its paths are root-relative
+    // whatever directory it was pointed at. A first version of this prepended
+    // the subdir prefix as well and produced `src/src/bytes.rs` — for which
+    // `git log -L` reports no history rather than an error, so the suite came
+    // back empty and the run said "no descriptive commits touching indexed
+    // symbols". It cost an afternoon precisely because a wrong path here is
+    // silent. See `a_subdirectory_derives_the_same_suite_as_its_root`.
+    let repo = git_root(repo)?;
     let repo = repo.as_str();
 
     // Memoise the per-symbol traces against this HEAD. See [`trace_cache`] for
@@ -511,6 +497,45 @@ mod tests {
             out.contains("@@ -31,") || out.contains("+31,"),
             "region B requested at 36,45 must be reported at its historical \
              position, proving coordinates are not stable: {out}"
+        );
+    }
+
+    #[test]
+    fn a_subdirectory_derives_the_same_suite_as_its_root() {
+        // The regression that cost an afternoon. `trace_targets` keys paths off
+        // the git root already, so `derive` must resolve the root WITHOUT
+        // rebasing paths onto it. Prepending the subdir prefix produced
+        // `src/src/f.rs`, and `git log -L` answers a nonexistent path with an
+        // empty history rather than an error — so the suite came back empty and
+        // the harness reported "no descriptive commits touching indexed
+        // symbols", which points at the corpus instead of at the bug.
+        let r = Repo::new("subdir");
+        std::fs::create_dir_all(r.0.join("src")).unwrap();
+        r.write("src/f.rs", "fn alpha() {\n    one();\n}\n");
+        r.commit("add the alpha helper used by the parser");
+        r.write("src/f.rs", "fn alpha() {\n    one();\n    two();\n}\n");
+        r.commit("extend alpha to call the second helper too");
+
+        // Root-relative, exactly as `trace_targets` produces them.
+        let targets = vec![TraceTarget {
+            path: "src/f.rs".into(),
+            name: "alpha".into(),
+            start_line: 1,
+            end_line: 4,
+        }];
+
+        let from_root = derive(r.path(), &targets, 10).unwrap();
+        let sub = r.0.join("src");
+        let from_subdir = derive(sub.to_str().unwrap(), &targets, 10).unwrap();
+
+        assert!(
+            !from_root.is_empty(),
+            "the fixture must produce a suite at all"
+        );
+        assert_eq!(
+            from_root.len(),
+            from_subdir.len(),
+            "pointing at a subdirectory must not change the derived suite"
         );
     }
 
