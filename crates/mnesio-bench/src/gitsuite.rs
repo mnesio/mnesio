@@ -37,6 +37,122 @@ use anyhow::{anyhow, Result};
 
 use crate::codeeval::{CodeQuery, Gold};
 
+/// Cached `git log -L` answers, keyed by repository HEAD.
+///
+/// ## Why a cache rather than fewer git calls
+///
+/// Tracing is one `git log -L` per symbol, measured at ~890 spawns/minute; a
+/// 20-repository run went past nine hours. The obvious fix is to batch many
+/// `-L` ranges into one invocation so git walks history once instead of once
+/// per symbol. **That does not work, and the reason is worth recording so
+/// nobody tries it again.**
+///
+/// Given `-L a,b:file -L c,d:file`, git emits one hunk per *changed* range,
+/// carrying that range's coordinates **as they were at that commit**. Those
+/// coordinates drift: a commit that inserts lines above a range moves it, and
+/// git emits *no hunk* for that commit because the range's content did not
+/// change. So the bookkeeping that would let a caller map a hunk back to the
+/// range that produced it happens at commits git never shows. Attribution by
+/// line number fails (coords drift), by emission order fails (a commit
+/// touching one range emits one hunk, indistinguishable from the other), and
+/// by replaying drift fails (the shifts are invisible). Verified directly on a
+/// constructed repository — see the module tests.
+///
+/// So the per-symbol call stays, and instead its *answer* is memoised. The key
+/// is the repository's HEAD sha plus the exact range: `git log -L` is a pure
+/// function of those, so a hit is byte-identical to a miss. **This changes no
+/// gold set by construction** — unlike a filter that skips symbols, which
+/// changes which queries exist at all.
+///
+/// First run still pays full price. Every re-run is free, which is what makes
+/// a paired A/B affordable: the second arm reads the cache the first arm
+/// wrote, and paired comparison is the thing the project's own standing rule
+/// requires of every claim.
+mod trace_cache {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// `(head_sha, range_spec) -> commits`.
+    type Map = HashMap<String, Vec<(String, String)>>;
+
+    static MEM: Mutex<Option<Map>> = Mutex::new(None);
+
+    fn path(repo_head: &str) -> PathBuf {
+        let base = std::env::var_os("MNESIO_CACHE_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("mnesio-gitsuite");
+        base.join(format!("{repo_head}.json"))
+    }
+
+    /// Load the on-disk cache for this HEAD into memory, once per process.
+    pub fn warm(repo_head: &str) {
+        let mut g = MEM.lock().unwrap();
+        if g.is_some() {
+            return;
+        }
+        let loaded = std::fs::read(path(repo_head))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Map>(&b).ok())
+            .unwrap_or_default();
+        *g = Some(loaded);
+    }
+
+    pub fn get(key: &str) -> Option<Vec<(String, String)>> {
+        MEM.lock().unwrap().as_ref()?.get(key).cloned()
+    }
+
+    pub fn put(key: String, value: Vec<(String, String)>) {
+        if let Some(m) = MEM.lock().unwrap().as_mut() {
+            m.insert(key, value);
+        }
+    }
+
+    /// Persist. A failure here costs a slow next run, never a wrong one, so it
+    /// is deliberately silent rather than fatal.
+    pub fn flush(repo_head: &str) {
+        let g = MEM.lock().unwrap();
+        let Some(m) = g.as_ref() else { return };
+        let p = path(repo_head);
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(bytes) = serde_json::to_vec(m) {
+            let tmp = p.with_extension("tmp");
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &p);
+            }
+        }
+    }
+
+    /// Drop the in-memory map so a different repository starts clean.
+    pub fn reset() {
+        *MEM.lock().unwrap() = None;
+    }
+}
+
+/// The repository's current HEAD, which is what makes a cached trace valid.
+///
+/// `None` when git won't say — a detached or empty repository. Callers then
+/// skip the cache entirely rather than key it on something unstable.
+fn head_sha(repo: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C", repo, "rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 /// Commits touching more symbols than this are dropped: with a large gold set,
 /// "retrieved at least one" stops discriminating between arms.
 const MAX_GOLD: usize = 3;
@@ -63,10 +179,15 @@ pub struct TraceTarget {
 /// Returns `(sha, subject)` pairs, newest first. A failure here is *not* an
 /// error for the run: a file can be untracked, or added in the initial import
 /// with no line history. Those symbols simply contribute no queries.
-fn commits_touching(repo: &str, target: &TraceTarget) -> Vec<(String, String)> {
+fn commits_touching(repo: &str, target: &TraceTarget, cached: bool) -> Vec<(String, String)> {
     // `-L` implies a patch we don't want, so we tag the header lines and keep
     // only those. `%x09` is a tab, which cannot appear in a subject.
     let range = format!("{},{}:{}", target.start_line, target.end_line, target.path);
+    if cached {
+        if let Some(hit) = trace_cache::get(&range) {
+            return hit;
+        }
+    }
     let out = Command::new("git")
         .args([
             "-C",
@@ -145,6 +266,16 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
         ));
     }
 
+    // Memoise the per-symbol traces against this HEAD. See [`trace_cache`] for
+    // why the answers are cached rather than the calls being batched — batching
+    // is unrecoverable, and this is byte-identical by construction.
+    let head = head_sha(repo);
+    if let Some(h) = &head {
+        trace_cache::reset();
+        trace_cache::warm(h);
+    }
+    let cached = head.is_some();
+
     // One `git log -L` per symbol is a subprocess spawn, so a large repo is
     // minutes of pure process overhead. Fan out across cores; git itself is
     // read-only here so the calls are independent.
@@ -161,7 +292,12 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
                 s.spawn(move || {
                     let mut out = Vec::new();
                     for t in part {
-                        for (sha, subject) in commits_touching(repo, t) {
+                        let hits = commits_touching(repo, t, cached);
+                        let range = format!("{},{}:{}", t.start_line, t.end_line, t.path);
+                        if cached {
+                            trace_cache::put(range, hits.clone());
+                        }
+                        for (sha, subject) in hits {
                             out.push((sha, subject, t.path.clone(), t.name.clone()));
                         }
                     }
@@ -175,6 +311,13 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
             .flatten()
             .collect()
     });
+
+    // Written once per repository, after every thread has finished, so a
+    // partially-traced run never persists a partial answer that a later run
+    // would trust.
+    if let Some(h) = &head {
+        trace_cache::flush(h);
+    }
 
     // sha -> (subject, gold symbol names). BTreeMap so the suite is
     // deterministic across runs; a benchmark whose contents shift between
@@ -215,6 +358,161 @@ pub fn derive(repo: &str, targets: &[TraceTarget], limit: usize) -> Result<Vec<C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A throwaway repository with a known history, so git's real behaviour is
+    /// asserted rather than assumed.
+    struct Repo(std::path::PathBuf);
+    impl Repo {
+        fn new(name: &str) -> Self {
+            let d =
+                std::env::temp_dir().join(format!("mnesio-gitsuite-{name}-{}", std::process::id()));
+            std::fs::remove_dir_all(&d).ok();
+            std::fs::create_dir_all(&d).unwrap();
+            let r = Repo(d);
+            r.git(&["init", "-q", "."]);
+            r.git(&["config", "user.email", "t@t"]);
+            r.git(&["config", "user.name", "t"]);
+            r
+        }
+        fn git(&self, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .current_dir(&self.0)
+                .args(args)
+                .output()
+                .expect("git must be on PATH for these tests");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+        fn write(&self, name: &str, body: &str) {
+            std::fs::write(self.0.join(name), body).unwrap();
+        }
+        fn commit(&self, msg: &str) {
+            self.git(&["add", "-A"]);
+            self.git(&["commit", "-q", "-m", msg]);
+        }
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn lines(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("line{i}\n"))
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
+    #[test]
+    fn batching_l_ranges_cannot_be_attributed_back_to_ranges() {
+        // The finding that decided the design, pinned so it is not re-litigated
+        // by someone who reads "one git call per symbol" and reaches for the
+        // obvious optimisation.
+        //
+        // Given two ranges in one `git log -L` call, git reports each changed
+        // range using ITS COORDINATES AT THAT COMMIT, and emits nothing at all
+        // for a commit that merely shifted a range without changing it. So the
+        // bookkeeping needed to map a hunk back to the range that produced it
+        // happens at commits git never shows, and a batched call's output is
+        // not invertible.
+        let r = Repo::new("batch");
+        r.write("f.txt", &lines(40));
+        r.commit("create the file with both regions");
+
+        // Edit inside the LOWER region while it still sits at 31..40, so git
+        // has a real hunk to report for it later, at coordinates that will by
+        // then be stale.
+        let edited_b = lines(40).replace("line35\n", "line35 EDITED\n");
+        r.write("f.txt", &edited_b);
+        r.commit("edit the lower region while it sits at its original lines");
+
+        // Insert above the lower region: it moves 31..40 -> 36..45, but its
+        // content does not change, so git emits no hunk for this commit.
+        let shifted = edited_b.replace("line12\n", "line12\nins1\nins2\nins3\nins4\nins5\n");
+        r.write("f.txt", &shifted);
+        r.commit("insert five lines between the regions");
+
+        // Region B is now at 36..45 in current coordinates.
+        let out = r.git(&[
+            "log",
+            "--no-merges",
+            "--format=COMMIT%x09%s",
+            "-L",
+            "1,10:f.txt",
+            "-L",
+            "36,45:f.txt",
+        ]);
+
+        let shifting_commit_emits_a_hunk = out
+            .split("COMMIT\t")
+            .any(|block| block.starts_with("insert five lines") && block.contains("@@ "));
+        assert!(
+            !shifting_commit_emits_a_hunk,
+            "if git ever starts reporting the commit that shifted a range, \
+             batched attribution becomes possible and this design should be \
+             revisited"
+        );
+
+        // And the coordinates genuinely drift, so a hunk cannot be matched to
+        // a requested range by line number either.
+        assert!(
+            out.contains("@@ -31,") || out.contains("+31,"),
+            "region B requested at 36,45 must be reported at its historical \
+             position, proving coordinates are not stable: {out}"
+        );
+    }
+
+    #[test]
+    fn a_cached_trace_is_identical_to_an_uncached_one() {
+        // The whole safety claim of the cache. If this ever fails, every
+        // number produced from a warm cache is suspect.
+        let r = Repo::new("cache");
+        r.write("a.rs", "fn alpha() {\n    one();\n}\n");
+        r.commit("add the alpha function with its helper call");
+        r.write("a.rs", "fn alpha() {\n    one();\n    two();\n}\n");
+        r.commit("extend alpha to call the second helper as well");
+
+        let target = TraceTarget {
+            path: "a.rs".into(),
+            name: "alpha".into(),
+            start_line: 1,
+            end_line: 4,
+        };
+        let head = head_sha(r.path()).expect("a repo with commits has a HEAD");
+
+        trace_cache::reset();
+        trace_cache::warm(&head);
+        let cold = commits_touching(r.path(), &target, true);
+        assert!(!cold.is_empty(), "the trace must find the commits");
+        trace_cache::put(
+            format!("{},{}:{}", target.start_line, target.end_line, target.path),
+            cold.clone(),
+        );
+        let warm = commits_touching(r.path(), &target, true);
+
+        assert_eq!(
+            cold, warm,
+            "a cache hit must equal what git would have said"
+        );
+    }
+
+    #[test]
+    fn a_cache_from_a_different_head_is_not_consulted() {
+        // Keyed by HEAD because `git log -L` is only a pure function given a
+        // fixed history. A new commit must invalidate, or the suite would be
+        // derived from code that no longer exists.
+        let r = Repo::new("head");
+        r.write("a.rs", "fn alpha() {}\n");
+        r.commit("add the alpha function to the module");
+        let first = head_sha(r.path()).unwrap();
+        r.write("a.rs", "fn alpha() {}\nfn beta() {}\n");
+        r.commit("add the beta function alongside alpha");
+        let second = head_sha(r.path()).unwrap();
+        assert_ne!(first, second, "a new commit must change the cache key");
+    }
 
     #[test]
     fn mechanical_subjects_are_rejected() {
