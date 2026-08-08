@@ -36,3 +36,35 @@ Listed rather than dropped: a suite that silently discards what it cannot handle
 
 manifest **codeeval-v1**, 10 repositories, 10 evaluated, 0 refused.
 wall clock **252s** against a declared budget of 2400s — within budget.
+
+---
+
+## Paired A/B: receiver-aware call binding — no detectable effect
+
+Ran the corpus twice more, changing only the resolver (`MNESIO_CODE_BARE_NAME=1`
+restores the pre-18 behaviour of binding `x.foo()` to any lone free `foo`), and
+once more with **no change at all** as a noise control.
+
+| comparison | symbol recall Δ | whole-file recall Δ |
+|---|---|---|
+| **noise** (strict vs strict) | max 2pp, mean 0.3pp | max 2pp, mean 0.4pp |
+| **effect** (strict vs loose) | max 2pp, mean 0.2pp | max 2pp, mean 0.4pp |
+
+**The effect is smaller than the noise floor.** Whole-file recall — which does
+not consult the call graph at all and therefore *cannot* be affected by the
+resolver — moved by exactly the same amount, which is what identifies the
+variation as HNSW build randomness rather than anything the change did.
+
+Two conclusions, and the second matters more:
+
+1. The receiver-aware fix is **recall-neutral at corpus scale** (526 queries,
+   10 repositories), consistent with the earlier 12-query result on `crates/`.
+   It stays, on the strength of correctness — a wrong edge misleads context
+   expansion — and because it made the hub list believable, not on recall.
+
+2. **This harness cannot resolve effects below ~2pp per repository.** Any
+   future change claiming a small improvement is unmeasurable here until the
+   index build is seeded deterministically. Running it anyway would produce a
+   number, and the number would be index randomness wearing the change's name
+   — which is exactly the Phase 16 mistake the paired-A/B rule exists to
+   prevent. The rule caught it; the control run is the reason.
