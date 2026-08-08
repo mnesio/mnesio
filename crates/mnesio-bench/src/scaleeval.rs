@@ -430,3 +430,182 @@ mod tests {
         assert!(text.contains("weird"));
     }
 }
+
+/// What repeated runs of one configuration reveal about the harness itself.
+///
+/// ## Why repetition and not a seed
+///
+/// The obvious response to a noisy benchmark is to seed the index build.
+/// `hnsw_rs` 0.3.4 constructs its layer-assignment RNG with
+/// `StdRng::from_os_rng()` and exposes no setter, so that is not available
+/// through the public API — but more importantly it would be **the wrong
+/// fix**.
+///
+/// A seed makes a run *reproducible*. It does not make a single-run comparison
+/// *valid*: two different configurations produce two different graphs whatever
+/// the seed, so one run per arm is still one sample from each of two
+/// distributions. Comparing two samples tells you nothing about the
+/// distributions unless you know how wide they are.
+///
+/// So the harness measures its own width. Run the same configuration N times,
+/// take the spread, and refuse to call anything a finding unless it exceeds
+/// that. Measured on `codeeval-v1`: symbol recall varies by up to 2pp per
+/// repository between identical runs, which is exactly the size of the
+/// strict-vs-loose resolver "effect" — the comparison that looked like a
+/// result until a control run was added.
+#[derive(Debug, Clone)]
+pub struct NoiseFloor {
+    /// Runs used to establish it.
+    pub runs: usize,
+    /// Largest observed variation in symbol recall for any one repository,
+    /// in percentage points, across identical runs.
+    pub symbol_pp: f32,
+    /// Same for whole-file recall. This one is the tell: the whole-file arm
+    /// never consults the call graph, so variation here cannot be caused by
+    /// any retrieval-policy change and is purely index randomness.
+    pub whole_file_pp: f32,
+}
+
+impl NoiseFloor {
+    /// Fold repeated reports of the *same* configuration into a noise floor.
+    pub fn from_repeats(reports: &[ScaleReport]) -> Option<Self> {
+        if reports.len() < 2 {
+            return None;
+        }
+        let key = |r: &RepoResult| (r.name.clone(), r.symbols);
+        let mut sym: f32 = 0.0;
+        let mut whole: f32 = 0.0;
+        for probe in &reports[0].repos {
+            let k = key(probe);
+            let mut ss: Vec<f32> = Vec::new();
+            let mut ws: Vec<f32> = Vec::new();
+            for rep in reports {
+                if let Some(r) = rep.repos.iter().find(|r| key(r) == k) {
+                    ss.push(r.symbol_peak);
+                    ws.push(r.whole_file_peak);
+                }
+            }
+            if ss.len() == reports.len() {
+                let sspread = ss.iter().cloned().fold(f32::MIN, f32::max)
+                    - ss.iter().cloned().fold(f32::MAX, f32::min);
+                let wspread = ws.iter().cloned().fold(f32::MIN, f32::max)
+                    - ws.iter().cloned().fold(f32::MAX, f32::min);
+                sym = sym.max(sspread * 100.0);
+                whole = whole.max(wspread * 100.0);
+            }
+        }
+        Some(NoiseFloor {
+            runs: reports.len(),
+            symbol_pp: sym,
+            whole_file_pp: whole,
+        })
+    }
+
+    /// Would a claimed delta of `pp` survive this noise floor?
+    ///
+    /// Deliberately strict: a delta merely *equal* to the observed spread is
+    /// not a finding, it is a coin landing the same way twice.
+    pub fn resolves(&self, pp: f32) -> bool {
+        pp.abs() > self.symbol_pp
+    }
+
+    pub fn render(&self) -> String {
+        format!(
+            "\n## noise floor\n\n\
+             {} identical runs of this configuration. Largest variation for any \
+             single repository: **{:.0}pp** symbol recall, {:.0}pp whole-file.\n\n\
+             Whole-file recall does not consult the call graph, so its variation \
+             is index-build randomness by construction — which is what makes it \
+             the reference for how much of the symbol-recall variation is also \
+             noise.\n\n\
+             **Any A/B on this corpus must exceed {:.0}pp to be a finding.** A \
+             seed would make runs reproducible but would not make a one-run-per-arm \
+             comparison valid: two configurations build two different graphs \
+             whatever the seed, so a single sample from each says nothing about \
+             the distributions.\n",
+            self.runs, self.symbol_pp, self.whole_file_pp, self.symbol_pp
+        )
+    }
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::*;
+
+    fn repo(name: &str, sym: f32, whole: f32) -> RepoResult {
+        RepoResult {
+            name: name.into(),
+            files: 10,
+            symbols: 900,
+            queries: 60,
+            symbol_peak: sym,
+            whole_file_peak: whole,
+            rankable: 0.2,
+            unreachable: 0.1,
+            index_secs: 1.0,
+        }
+    }
+    fn report(rs: Vec<RepoResult>) -> ScaleReport {
+        ScaleReport {
+            repos: rs,
+            skipped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_single_run_cannot_establish_a_noise_floor() {
+        // One sample has no spread. Returning 0 here would let any delta pass
+        // as a finding — the opposite of what this exists for.
+        assert!(NoiseFloor::from_repeats(&[report(vec![repo("a", 0.5, 0.7)])]).is_none());
+    }
+
+    #[test]
+    fn the_floor_is_the_widest_single_repository_not_the_average() {
+        // Averaging spread across repositories would hide the one repository
+        // that swings most, and that is exactly the one a cherry-picked A/B
+        // would be quoted from.
+        let a = report(vec![repo("steady", 0.50, 0.70), repo("swingy", 0.40, 0.70)]);
+        let b = report(vec![repo("steady", 0.51, 0.70), repo("swingy", 0.48, 0.70)]);
+        let nf = NoiseFloor::from_repeats(&[a, b]).unwrap();
+        assert!((nf.symbol_pp - 8.0).abs() < 0.01, "got {}", nf.symbol_pp);
+    }
+
+    #[test]
+    fn a_delta_equal_to_the_noise_is_not_a_finding() {
+        // Strictly greater. A delta the same size as the observed spread is a
+        // coin landing the same way twice.
+        // Binary-exact values, so this tests the rule rather than f32 rounding:
+        // 0.52 - 0.50 is not exactly 0.02, and the near-miss made the first
+        // assertion flip.
+        let a = report(vec![repo("r", 0.5, 0.75)]);
+        let b = report(vec![repo("r", 0.75, 0.75)]);
+        let nf = NoiseFloor::from_repeats(&[a, b]).unwrap();
+        assert_eq!(nf.symbol_pp, 25.0);
+        assert!(
+            !nf.resolves(25.0),
+            "a delta equal to the floor is not a finding"
+        );
+        assert!(nf.resolves(25.5));
+    }
+
+    #[test]
+    fn a_repository_missing_from_one_run_is_not_folded_in() {
+        // A repository that failed in one run and not another would otherwise
+        // contribute a spurious spread from a comparison that never happened.
+        let a = report(vec![repo("both", 0.50, 0.70), repo("only-a", 0.10, 0.10)]);
+        let b = report(vec![repo("both", 0.50, 0.70)]);
+        let nf = NoiseFloor::from_repeats(&[a, b]).unwrap();
+        assert_eq!(nf.symbol_pp, 0.0);
+    }
+
+    #[test]
+    fn the_rendered_floor_states_the_threshold_a_claim_must_beat() {
+        // It goes into a results file a reader may quote from, so the
+        // threshold has to travel with the number.
+        let a = report(vec![repo("r", 0.50, 0.70)]);
+        let b = report(vec![repo("r", 0.53, 0.70)]);
+        let out = NoiseFloor::from_repeats(&[a, b]).unwrap().render();
+        assert!(out.contains("must exceed"), "got: {out}");
+        assert!(out.contains("2 identical runs"), "got: {out}");
+    }
+}

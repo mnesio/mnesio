@@ -68,3 +68,33 @@ Two conclusions, and the second matters more:
    number, and the number would be index randomness wearing the change's name
    — which is exactly the Phase 16 mistake the paired-A/B rule exists to
    prevent. The rule caught it; the control run is the reason.
+
+---
+
+## Noise floor — measured, not assumed
+
+`manifest run --repeat 3` runs the *same* configuration three times and reports
+the largest per-repository variation:
+
+| | |
+|---|---|
+| symbol recall | **2pp** |
+| whole-file recall | **2pp** |
+| wall clock, 3 runs | 743s (budget 2400s) |
+
+**Any A/B on this corpus must exceed 2pp to be a finding.** The resolver
+comparison above moved by at most 2pp, which is why it is reported as null.
+
+### Why repetition rather than a seed
+
+`hnsw_rs` 0.3.4 builds its layer-assignment RNG with `StdRng::from_os_rng()`
+and exposes no setter, so seeding is not available through the public API. It
+would also be the wrong fix: a seed makes a run *reproducible*, but two
+different configurations build two different graphs whatever the seed, so one
+run per arm is still a single sample from each of two distributions. Knowing
+the width of those distributions is what makes a comparison valid, and only
+repetition gives you that.
+
+Whole-file recall is the calibration: that arm never consults the call graph,
+so its variation cannot be caused by any retrieval-policy change. It is a
+clean read on index randomness alone.

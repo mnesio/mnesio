@@ -1620,6 +1620,9 @@ struct ManifestOpts {
     work: String,
     ks: Vec<usize>,
     embedder: String,
+    /// Identical runs, to measure the harness's own noise floor. See
+    /// [`mnesio_bench::scaleeval::NoiseFloor`] for why this and not a seed.
+    repeat: usize,
 }
 
 fn parse_manifest(
@@ -1641,9 +1644,11 @@ fn parse_manifest(
         ),
         ks: vec![1, 5, 20],
         embedder: "fastembed".into(),
+        repeat: 1,
     };
     while let Some(a) = iter.next() {
         match a.as_str() {
+            "--repeat" => o.repeat = next_value(&mut iter, "--repeat")?.parse()?,
             "--manifest" => o.path = Some(next_value(&mut iter, "--manifest")?),
             "--out" => o.out = Some(next_value(&mut iter, "--out")?),
             "--work" => o.work = next_value(&mut iter, "--work")?,
@@ -1733,10 +1738,29 @@ async fn cmd_manifest(opts: ManifestOpts) -> Result<()> {
 
     let per_repo = m.repos.first().map(|r| r.queries).unwrap_or(60);
     let started = std::time::Instant::now();
-    let report = run_scale(&roots, &opts.ks, &opts.embedder, per_repo).await?;
+
+    // Repeat the *same* configuration to measure how much the answer moves on
+    // its own. Without that number no delta from any A/B can be called a
+    // finding — which is exactly how the Phase 16 reranker "regression" got
+    // published before a control run showed it was index randomness.
+    let mut reports = Vec::new();
+    for i in 0..opts.repeat.max(1) {
+        if opts.repeat > 1 {
+            eprintln!("# run {}/{}", i + 1, opts.repeat);
+        }
+        reports.push(run_scale(&roots, &opts.ks, &opts.embedder, per_repo).await?);
+    }
+    let report = reports.remove(0);
     let elapsed = started.elapsed().as_secs();
 
     let mut text = format_scale(&report);
+    if opts.repeat > 1 {
+        let mut all = vec![report.clone()];
+        all.extend(reports);
+        if let Some(nf) = mnesio_bench::scaleeval::NoiseFloor::from_repeats(&all) {
+            text.push_str(&nf.render());
+        }
+    }
     text.push_str(&format!(
         "\n## corpus\n\n\
          manifest **{}**, {} repositories, {} evaluated, {} refused.\n\
