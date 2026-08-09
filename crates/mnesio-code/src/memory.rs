@@ -671,6 +671,106 @@ fn record(
     );
 }
 
+/// Extensions that are never source code, and so are never a coverage gap.
+///
+/// Without this the rate answers the wrong question. Measured on a real
+/// repository, counting assets and data dragged coverage from 39% to 19% and
+/// pushed `.png`, `.json` and `.svg` above `.cpp` in the "what you are missing"
+/// list — so the number looked worse than the truth *and* buried the one line
+/// that was actionable. A missing grammar is a fixable gap; an icon is not.
+///
+/// Deliberately a denylist rather than an allowlist of source extensions: an
+/// unrecognised extension stays counted as a gap, so a language we have simply
+/// never seen shows up as a gap rather than silently vanishing from the
+/// denominator. Over-reporting is the safe direction.
+const NOT_SOURCE: &[&str] = &[
+    // Data and configuration.
+    "json", "toml", "yaml", "yml", "xml", "csv", "tsv", "ini", "cfg", "lock", "env", //
+    // Prose.
+    "md", "mdx", "txt", "rst", "adoc", "pdf", "docx", //
+    // Images and fonts.
+    "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "bmp", "woff", "woff2", "ttf", "otf", //
+    // Build output and archives.
+    "lockb", "map", "min", "zip", "tar", "gz", "wasm", "so", "dylib", "dll", "o", "a", "bin",
+];
+
+/// What a build could and could not read under a directory.
+///
+/// Language support is a *compile-time* property here — the dependency-free
+/// parser follows six languages, the `tree-sitter` feature thirty — so the same
+/// command on the same repository produces different maps from different
+/// binaries. Skipping silently makes that indistinguishable from a small
+/// codebase: a Go monorepo indexed by a build without grammars yields an almost
+/// empty graph that looks like a finding rather than a missing feature.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Coverage {
+    /// Files this build can parse.
+    pub indexable: usize,
+    /// Files skipped because their extension maps to no language here.
+    pub skipped: usize,
+    /// The most common skipped extensions, descending, so the message can name
+    /// what was lost instead of only counting it.
+    pub top_skipped: Vec<(String, usize)>,
+}
+
+impl Coverage {
+    /// Fraction of candidate files this build could read, or `None` when there
+    /// were no candidates at all.
+    ///
+    /// `None` rather than `0.0`: an empty directory and a directory of
+    /// unreadable files are different problems with different fixes, and
+    /// printing "0% covered" for the former would send a reader after a
+    /// grammar they do not need.
+    pub fn rate(&self) -> Option<f32> {
+        let total = self.indexable + self.skipped;
+        (total > 0).then(|| self.indexable as f32 / total as f32)
+    }
+}
+
+/// Survey a directory without parsing it: which files this build can read.
+///
+/// Walks the same tree with the same exclusions as indexing, so the counts
+/// describe the run that is about to happen rather than an idealised one.
+pub fn survey(dir: impl AsRef<Path>) -> Coverage {
+    let mut cov = Coverage::default();
+    let mut by_ext: Vec<(String, usize)> = Vec::new();
+    survey_into(dir.as_ref(), &mut cov, &mut by_ext);
+    by_ext.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    by_ext.truncate(5);
+    cov.top_skipped = by_ext;
+    cov
+}
+
+fn survey_into(dir: &Path, cov: &mut Coverage, by_ext: &mut Vec<(String, usize)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if SKIP_DIRS.contains(&name) || name.starts_with('.') {
+                continue;
+            }
+            survey_into(&p, cov, by_ext);
+        } else if language_of(&p).is_some() {
+            cov.indexable += 1;
+        } else if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+            // Extensionless files are configuration and licences, not source
+            // anyone expected to be indexed, so they are not counted as a loss.
+            // Neither are assets — see `NOT_SOURCE`.
+            if NOT_SOURCE.contains(&ext) {
+                continue;
+            }
+            cov.skipped += 1;
+            match by_ext.iter_mut().find(|(e, _)| e == ext) {
+                Some((_, n)) => *n += 1,
+                None => by_ext.push((ext.to_string(), 1)),
+            }
+        }
+    }
+}
+
 fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -717,6 +817,100 @@ mod tests {
 
     fn embedder() -> Arc<dyn Embedder> {
         Arc::new(MockEmbedder::new(32))
+    }
+
+    #[test]
+    fn survey_names_what_this_build_could_not_read() {
+        // The failure this prevents: someone installs without grammars, runs
+        // the CLI on a C++ repo, and gets a nearly empty map that looks like a
+        // finding about their code rather than a missing feature.
+        let repo = TempRepo::new(&[
+            ("src/a.rs", "fn a() {}"),
+            ("src/b.rs", "fn b() {}"),
+            ("src/x.cpp", "int x() { return 0; }"),
+            ("src/y.cpp", "int y() { return 0; }"),
+            ("src/z.cpp", "int z() { return 0; }"),
+            ("src/w.hs", "main = pure ()"),
+        ]);
+        let cov = survey(&repo.0);
+
+        assert_eq!(cov.indexable, 2, "the two .rs files");
+        assert_eq!(cov.skipped, 4, "three .cpp and one .hs");
+        assert_eq!(
+            cov.top_skipped.first(),
+            Some(&("cpp".to_string(), 3)),
+            "the most-skipped extension must be named, not just counted: \
+             a number alone does not tell anyone which grammar they need"
+        );
+        assert!((cov.rate().unwrap() - 2.0 / 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn survey_skips_the_same_directories_indexing_does() {
+        // If the survey walked a different tree from the indexer, its coverage
+        // number would describe a run that never happens — and `target/` alone
+        // would swamp every real count.
+        let repo = TempRepo::new(&[
+            ("src/a.rs", "fn a() {}"),
+            ("target/debug/junk.cpp", "int j() { return 0; }"),
+            ("node_modules/p/index.cpp", "int p() { return 0; }"),
+            (".git/hooks/thing.cpp", "int t() { return 0; }"),
+        ]);
+        let cov = survey(&repo.0);
+
+        assert_eq!(cov.indexable, 1);
+        assert_eq!(cov.skipped, 0, "build output is not a coverage gap");
+    }
+
+    #[test]
+    fn an_empty_directory_has_no_coverage_rate_rather_than_zero() {
+        // 0/0 is not 0%. "0% covered" would send a reader after a grammar they
+        // do not need for a directory that has no source in it at all.
+        let repo = TempRepo::new(&[("README.md", "# hi"), ("LICENSE", "MIT")]);
+        let cov = survey(&repo.0);
+
+        assert_eq!(cov.indexable, 0);
+        assert_eq!(
+            cov.skipped, 0,
+            "prose and an extensionless licence are not code"
+        );
+        assert_eq!(cov.rate(), None, "nothing to cover is not zero coverage");
+        assert_eq!(survey(repo.0.join("nope")).rate(), None);
+    }
+
+    #[test]
+    fn assets_are_not_counted_as_a_missing_grammar() {
+        // Measured on a real repository: counting `.png`/`.json`/`.svg` put
+        // coverage at 19% instead of 39%, and ranked them *above* `.cpp` in the
+        // "what you are missing" list — a worse-than-true number whose most
+        // prominent advice was to go find a PNG parser.
+        let repo = TempRepo::new(&[
+            ("src/a.rs", "fn a() {}"),
+            ("src/net.cpp", "int n() { return 0; }"),
+            ("assets/logo.png", "\u{89}PNG"),
+            ("assets/icon.svg", "<svg/>"),
+            ("package.json", "{}"),
+            ("Cargo.lock", ""),
+            ("README.md", "# hi"),
+        ]);
+        let cov = survey(&repo.0);
+
+        assert_eq!(cov.indexable, 1);
+        assert_eq!(cov.skipped, 1, "only the .cpp is a real gap");
+        assert_eq!(cov.top_skipped, vec![("cpp".to_string(), 1)]);
+        assert_eq!(cov.rate(), Some(0.5));
+    }
+
+    #[test]
+    fn an_unknown_extension_still_counts_as_a_gap() {
+        // The denylist must not drift into an allowlist. A language nobody here
+        // has heard of should surface as something to look at, not drop out of
+        // the denominator and quietly inflate coverage.
+        let repo = TempRepo::new(&[("src/a.rs", "fn a() {}"), ("src/thing.wobble", "fn t() {}")]);
+        let cov = survey(&repo.0);
+
+        assert_eq!(cov.skipped, 1);
+        assert_eq!(cov.rate(), Some(0.5));
     }
 
     /// Embedder that records how many texts it was asked to embed.

@@ -147,6 +147,52 @@ async fn run() -> Result<(), String> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| dir.display().to_string());
 
+    // Before indexing, not after: language support is a compile-time property
+    // of this binary, so the same command on the same repository maps different
+    // amounts of it from different builds. Reporting only the symbol count
+    // would make "installed without grammars" look identical to "small
+    // codebase", and the second is the flattering reading.
+    let cov = mnesio_code::survey(&dir);
+    let named = || {
+        cov.top_skipped
+            .iter()
+            .map(|(e, n)| format!(".{e} ({n})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let Some(rate) = cov.rate() else {
+        return Err(format!("no source files under {}", dir.display()));
+    };
+    if cov.indexable == 0 {
+        // Fail here rather than starting an index that cannot succeed. The
+        // downstream error names the supported languages but not the ones
+        // actually present, and two errors for one cause read as a bug.
+        return Err(format!(
+            "none of the {} source files under {} are in a language this build \
+             can parse — found {}.\nRebuild with `--features tree-sitter` for \
+             30 languages instead of 6.",
+            cov.skipped,
+            dir.display(),
+            named(),
+        ));
+    }
+    if cov.skipped > 0 {
+        eprintln!(
+            "reading {}/{} files ({:.0}%) — skipped: {}",
+            cov.indexable,
+            cov.indexable + cov.skipped,
+            rate * 100.0,
+            named(),
+        );
+        if rate < 0.5 {
+            eprintln!(
+                "  Most of this repository is in a language this build cannot \
+                 parse.\n  Rebuild with `--features tree-sitter` for 30 \
+                 languages instead of 6."
+            );
+        }
+    }
+
     eprintln!("indexing {} …", dir.display());
     let started = std::time::Instant::now();
     let memory = CodeMemory::index(&dir, Scope::global("code"), embedder(&opts.embedder)?)

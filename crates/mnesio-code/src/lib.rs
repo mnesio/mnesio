@@ -55,7 +55,7 @@ pub use graph::{CodeGraph, GraphConfig, GraphEdge, GraphNode, GraphSource, NodeE
 pub use index::{CodeIndexer, EdgeStats, IndexPlan, IndexStats, CODE_TAG};
 pub use journal::{JournalEntry, JournalRead, OutcomeJournal};
 pub use learn::{LearnConfig, RuleProposal, SymbolLedger};
-pub use memory::{CodeContext, CodeHit, CodeMemory};
+pub use memory::{survey, CodeContext, CodeHit, CodeMemory, Coverage};
 pub use outcome::{AttributedSymbol, Attribution, CodeOutcome, DecisionEvidence, EditResult};
 pub use pack::{pack, Form, PackConfig, PackSource, PackedContext, PackedSymbol, Reason};
 pub use parse::{CodeParser, HeuristicParser, ParseError};
