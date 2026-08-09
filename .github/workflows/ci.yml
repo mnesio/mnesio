@@ -113,7 +113,7 @@ jobs:
         run: cargo run -p mnesio-bench -- kveval --suite longmemeval
 
   kv-features:
-    name: KV cartridge feature gates (clippy)
+    name: Optional feature gates (KV backends + tree-sitter)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -132,3 +132,14 @@ jobs:
         run: cargo clippy -p mnesio-kv --all-targets --features pretrained-kv,generative-kv,qwen-kv -- -D warnings
       - name: clippy candle GPU backend (CPU build on CI)
         run: cargo clippy -p mnesio-kv --all-targets --features candle-kv -- -D warnings
+
+      # Same rot, different crate — and this one already happened. `via_receiver`
+      # was added to `CodeEdge` and wired into the heuristic parser only, so
+      # `--features tree-sitter` failed to compile while every default-feature
+      # job stayed green. Unlike the KV backends these tests need no weights and
+      # no network, so they *run* rather than only compiling: a grammar whose
+      # tags query silently matches nothing is caught by the tests, not clippy.
+      - name: test tree-sitter grammars (30 languages)
+        run: cargo test -p mnesio-code --features tree-sitter
+      - name: clippy tree-sitter grammars
+        run: cargo clippy -p mnesio-code --all-targets --features tree-sitter -- -D warnings

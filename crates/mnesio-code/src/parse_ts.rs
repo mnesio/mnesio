@@ -36,6 +36,26 @@
 //!
 //! Both are worth having. Neither is a recall claim, and this module should
 //! not be described as one until a paired run says otherwise.
+//!
+//! Measured on `crates/mnesio-code/src` (14 files), grammars against the
+//! heuristic parser: **385 symbols vs 219, 291 resolved calls vs 82, 20%
+//! resolution vs 10%**. So on Rust the grammar is better on every axis.
+//!
+//! ## Where it is *worse* than that suggests: C and C++ have no call graph
+//!
+//! `tags.scm` is written by each grammar's own authors, and they do not all
+//! answer the same questions. `tree-sitter-c` and `tree-sitter-cpp` ship
+//! **zero** `@reference.call` patterns — their queries capture definitions
+//! only. So a C or C++ repository indexes its symbols and produces *no call
+//! edges at all*, which means no graph expansion and nothing for
+//! [`crate::pack`] to expand along.
+//!
+//! This is worth stating precisely because the symptom is indistinguishable
+//! from a hard problem: a 0% resolution rate reads as "the resolver failed",
+//! when in fact no call site was ever reported to it. The first is a
+//! resolution problem (Phase 18F), the second is a missing query — a much
+//! cheaper fix, and one whose absence no amount of type inference would
+//! address. `own_tags` is where such a query would go.
 
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -389,13 +409,17 @@ impl CodeParser for TreeSitterParser {
         let mut matches = cursor.matches(&query, tree.root_node(), bytes);
         while let Some(m) = matches.next() {
             let mut name: Option<&str> = None;
+            let mut name_node: Option<tree_sitter::Node> = None;
             let mut def: Option<tree_sitter::Node> = None;
             let mut kind: Option<SymbolKind> = None;
             let mut call: Option<tree_sitter::Node> = None;
 
             for cap in m.captures {
                 match names[cap.index as usize] {
-                    "name" => name = cap.node.utf8_text(bytes).ok(),
+                    "name" => {
+                        name = cap.node.utf8_text(bytes).ok();
+                        name_node = Some(cap.node);
+                    }
                     "reference.call" => call = Some(cap.node),
                     other => {
                         if let Some(k) = kind_of(other) {
@@ -411,11 +435,14 @@ impl CodeParser for TreeSitterParser {
             if call.is_some() && def.is_none() {
                 // Byte offset, so the call can be attributed to whichever
                 // definition encloses it once every span is known.
-                calls.push((
-                    m.captures[0].node.start_byte(),
-                    m.captures[0].node.end_byte(),
-                    name.to_string(),
-                ));
+                //
+                // The `@name` node specifically, not `captures[0]`: receiver
+                // detection reads the character immediately before this offset,
+                // and only the identifier's own start puts the `.` of
+                // `x.push(1)` there. `captures[0]` is whichever capture the
+                // grammar's query happens to list first.
+                let n = name_node.unwrap_or(m.captures[0].node);
+                calls.push((n.start_byte(), n.end_byte(), name.to_string()));
                 continue;
             }
 
@@ -459,6 +486,30 @@ fn first_line(text: &str) -> String {
 
 /// Bind each call site to the innermost definition containing it.
 ///
+/// Did the call at `at` have a receiver — `x.name(..)` or `T::name(..)`?
+///
+/// Decided from the source text rather than the syntax tree on purpose. The
+/// node type for a method call differs in every one of the 28 grammars
+/// ([`GRAMMARS`]), so a tree-based check would be a per-language table that
+/// silently returns "no receiver" for any language nobody remembered to add —
+/// and "no receiver" is the answer that lets `vec.push(x)` bind to a free
+/// function named `push`. A `.` or `::` before the identifier means the same
+/// thing in every language here, and [`crate::HeuristicParser`] already decides
+/// it exactly this way, so the two parsers stay comparable.
+fn preceded_by_receiver(source: &str, at: usize) -> bool {
+    // Slicing a non-boundary panics. Tree-sitter offsets are boundaries in
+    // valid UTF-8, but a parser is not the place to stake a panic on that.
+    let Some(before) = source.get(..at) else {
+        return false;
+    };
+    let mut chars = before.chars().rev();
+    match chars.next() {
+        Some('.') => true,
+        Some(':') => chars.next() == Some(':'),
+        _ => false,
+    }
+}
+
 /// Byte spans rather than line numbers: two definitions can share a line, and
 /// a wrong attribution produces an edge that actively misleads expansion.
 fn attribute_calls(
@@ -504,6 +555,7 @@ fn attribute_calls(
                 from: owner.key(),
                 to_name: name.clone(),
                 kind: EdgeKind::Calls,
+                via_receiver: preceded_by_receiver(source, *cs),
             });
         }
     }
@@ -518,6 +570,105 @@ mod tests {
 
     fn parse(lang: &str, src: &str) -> ParsedFile {
         TreeSitterParser.parse("f", lang, src).unwrap()
+    }
+
+    #[test]
+    fn a_method_call_is_marked_as_having_a_receiver() {
+        // Why this matters: without the flag, `v.push(x)` binds to any free
+        // function named `push` anywhere in the repository. Measured on this
+        // workspace that gave `push` 142 inbound edges and made it the top
+        // "most depended on" symbol — an artefact, not a fact about the code.
+        //
+        // This regressed once already in the shape a feature gate makes easy:
+        // `via_receiver` was added to the heuristic parser, and the field was
+        // simply missing here, so `--features tree-sitter` did not compile at
+        // all while the default build stayed green.
+        let f = parse(
+            "rust",
+            "fn caller() {\n    let mut v = Vec::new();\n    v.push(1);\n    helper();\n}\nfn helper() {}\n",
+        );
+
+        let push = f.edges.iter().find(|e| e.to_name == "push");
+        let helper = f.edges.iter().find(|e| e.to_name == "helper");
+        assert!(
+            push.is_some_and(|e| e.via_receiver),
+            "v.push(1) has a receiver; got {:?}",
+            f.edges
+        );
+        assert!(
+            helper.is_some_and(|e| !e.via_receiver),
+            "helper() is a bare call; got {:?}",
+            f.edges
+        );
+    }
+
+    #[test]
+    fn a_path_qualified_call_produces_no_edge_at_all() {
+        // Not the behaviour anyone would choose — recorded because it is
+        // upstream's, and because it is one measured reason the resolution rate
+        // is low. Rust's own `tags.scm` captures `x.method()` and `free()` as
+        // `@reference.call` but not `Type::assoc()`, so associated-function
+        // calls are absent from the graph rather than merely unresolved.
+        //
+        // Pinned so that a grammar update which starts emitting them is
+        // noticed: the receiver logic already handles `::`, so the assertion
+        // to flip is this one, not `preceded_by_receiver`.
+        let f = parse(
+            "rust",
+            "fn caller() {\n    let _ = String::from(\"x\");\n}\n",
+        );
+        assert!(
+            !f.edges.iter().any(|e| e.to_name == "from"),
+            "upstream started capturing path-qualified calls — flip this test \
+             and check they arrive with via_receiver set; got {:?}",
+            f.edges
+        );
+    }
+
+    #[test]
+    fn the_receiver_check_reads_the_character_before_the_identifier() {
+        // Unit-level, because the grammar gap above means `::` has no
+        // end-to-end coverage in Rust. Other grammars in `GRAMMARS` do emit
+        // path-qualified calls, and this is the logic they land on.
+        assert!(preceded_by_receiver("v.push", 2));
+        assert!(preceded_by_receiver("T::new", 3));
+        assert!(!preceded_by_receiver("helper", 0));
+        assert!(!preceded_by_receiver("a helper", 2));
+        // A label or ternary — one colon is not a path separator.
+        assert!(!preceded_by_receiver("x ? a:b", 6));
+        // Must not panic when the offset splits a multi-byte character.
+        assert!(!preceded_by_receiver("é(", 1));
+    }
+
+    #[test]
+    fn c_and_cpp_report_no_call_sites_at_all() {
+        // Not our bug and not a resolution failure — `tree-sitter-c` and
+        // `tree-sitter-cpp` ship tags queries with zero `@reference.call`
+        // patterns, so a C/C++ repository indexes symbols and produces no call
+        // edges whatever. Measured live: a 54-file C/C++/GLSL repository mapped
+        // 46 files, 170 symbols and 0 edges.
+        //
+        // Pinned because the symptom is indistinguishable from a hard problem.
+        // "0% of call sites resolved" reads as a resolver that failed, when in
+        // fact nothing was ever handed to it — a missing query (cheap, goes in
+        // `own_tags`) rather than the type inference of Phase 18F.
+        for lang in ["c", "cpp"] {
+            let f = parse(
+                lang,
+                "int helper(void) { return 1; }\nint caller(void) { return helper(); }\n",
+            );
+            assert!(
+                !f.symbols.is_empty(),
+                "{lang} must still extract definitions"
+            );
+            assert!(
+                f.edges.is_empty(),
+                "{lang} started reporting call sites — upstream added \
+                 @reference.call, so drop the `own_tags` TODO and re-measure \
+                 the resolution rate; got {:?}",
+                f.edges
+            );
+        }
     }
 
     #[test]

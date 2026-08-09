@@ -46,6 +46,49 @@ Two continuous loops operate over a single append-only event log:
 
 ---
 
+## 🗺️ Map a codebase — one command, no server
+
+```bash
+git clone https://github.com/mnesio/mnesio.git && cd mnesio
+cargo install --path crates/mnesio-code --features tree-sitter
+mnesio-code .
+```
+
+Writes three files into the directory you pointed at:
+
+| file | what it is |
+|---|---|
+| `mnesio-map.html` | the interactive map — self-contained, open it in a browser |
+| `MNESIO_MAP.md` | the same findings as text, for a terminal or a pull request |
+| `mnesio-map.json` | the graph |
+
+No port, no running process, nothing fetched at view time — the page inlines
+its own data, so you can attach it to a review or mail it to someone.
+
+`--features tree-sitter` is worth the longer build: without it you get six
+languages instead of thirty. Either way the tool tells you what it skipped
+rather than quietly drawing a smaller map —
+
+```
+reading 18/54 files (33%) — skipped: .h (16), .cpp (12), .css (2), .frag (2)
+  Most of this repository is in a language this build cannot parse.
+```
+
+**What it does not print is a token-saving multiple.** Every number in the
+artifacts describes the repository in front of it — symbols, resolved calls,
+communities, and the share of call sites that bound to a definition, which is
+how much of the call graph is *missing*. Retrieval quality is a benchmark
+question with a benchmark answer, and it lives in
+[`manifest/codeeval-v1-results.md`](crates/mnesio-bench/manifest/codeeval-v1-results.md)
+where you can re-run it.
+
+The map colours symbols by whether retrieving them actually *helped* — but only
+once there are outcomes to colour with, which means running the MCP server
+below. On a fresh repository that section says it is empty instead of
+disappearing.
+
+---
+
 ## ⚡ Quick start
 
 **Fastest — no Rust toolchain, one command** (builds + runs in Docker, serves the

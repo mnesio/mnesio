@@ -824,21 +824,25 @@ mod tests {
         // The failure this prevents: someone installs without grammars, runs
         // the CLI on a C++ repo, and gets a nearly empty map that looks like a
         // finding about their code rather than a missing feature.
+        // Extensions no build recognises, so the assertion holds with or
+        // without `--features tree-sitter`. Using `.cpp` here made this test
+        // pass by default and fail under the feature, which is the same blind
+        // spot that let the tree-sitter build break unnoticed.
         let repo = TempRepo::new(&[
             ("src/a.rs", "fn a() {}"),
             ("src/b.rs", "fn b() {}"),
-            ("src/x.cpp", "int x() { return 0; }"),
-            ("src/y.cpp", "int y() { return 0; }"),
-            ("src/z.cpp", "int z() { return 0; }"),
-            ("src/w.hs", "main = pure ()"),
+            ("src/x.wobble", "x"),
+            ("src/y.wobble", "y"),
+            ("src/z.wobble", "z"),
+            ("src/w.zonk", "w"),
         ]);
         let cov = survey(&repo.0);
 
         assert_eq!(cov.indexable, 2, "the two .rs files");
-        assert_eq!(cov.skipped, 4, "three .cpp and one .hs");
+        assert_eq!(cov.skipped, 4, "three .wobble and one .zonk");
         assert_eq!(
             cov.top_skipped.first(),
-            Some(&("cpp".to_string(), 3)),
+            Some(&("wobble".to_string(), 3)),
             "the most-skipped extension must be named, not just counted: \
              a number alone does not tell anyone which grammar they need"
         );
@@ -886,7 +890,7 @@ mod tests {
         // prominent advice was to go find a PNG parser.
         let repo = TempRepo::new(&[
             ("src/a.rs", "fn a() {}"),
-            ("src/net.cpp", "int n() { return 0; }"),
+            ("src/net.wobble", "n"),
             ("assets/logo.png", "\u{89}PNG"),
             ("assets/icon.svg", "<svg/>"),
             ("package.json", "{}"),
@@ -896,8 +900,8 @@ mod tests {
         let cov = survey(&repo.0);
 
         assert_eq!(cov.indexable, 1);
-        assert_eq!(cov.skipped, 1, "only the .cpp is a real gap");
-        assert_eq!(cov.top_skipped, vec![("cpp".to_string(), 1)]);
+        assert_eq!(cov.skipped, 1, "only the source file is a real gap");
+        assert_eq!(cov.top_skipped, vec![("wobble".to_string(), 1)]);
         assert_eq!(cov.rate(), Some(0.5));
     }
 
