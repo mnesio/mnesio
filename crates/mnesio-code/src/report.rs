@@ -95,6 +95,23 @@ pub fn render_markdown(graph: &CodeGraph, repo: &str, stats: &IndexStats) -> Str
         ),
     }
 
+    // The second honesty axis. The rate above says how much of the call graph
+    // is *missing*; this says how much of what remains was *guessed*, and those
+    // are different questions. An edge crossing files was bound by name
+    // uniqueness with no type information behind it — that is where a wrong
+    // edge comes from, and a reader deciding whether to act on one needs to
+    // know which kind they are looking at.
+    let (extracted, inferred) = graph.binding_split();
+    if extracted + inferred > 0 {
+        out.push_str(&format!(
+            "> **{extracted} edges read, {inferred} inferred.** An *extracted* \
+             edge calls a definition in its own file — the name is right there. \
+             An *inferred* one was bound to a unique same-named definition \
+             elsewhere, which is a guess: the resolver cannot tell one `parse` \
+             from another. Weigh them differently.\n\n"
+        ));
+    }
+
     if graph.truncated > 0 {
         out.push_str(&format!(
             "> Showing {} of {} symbols — the most-connected were kept. This \
@@ -210,14 +227,15 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         syms: Vec<(MemoryRef, String, String, SymbolKind)>,
+        links: std::collections::HashMap<MemoryRef, Vec<MemoryRef>>,
         res: Resolution,
     }
     impl GraphSource for Fake {
         fn symbols(&self) -> Vec<(MemoryRef, String, String, SymbolKind)> {
             self.syms.clone()
         }
-        fn callees(&self, _: MemoryRef) -> Vec<MemoryRef> {
-            Vec::new()
+        fn callees(&self, of: MemoryRef) -> Vec<MemoryRef> {
+            self.links.get(&of).cloned().unwrap_or_default()
         }
         fn resolution(&self) -> Resolution {
             self.res
@@ -267,6 +285,35 @@ mod tests {
         let hubs = md.find("## Most depended on").unwrap();
         assert!(caveat < hubs, "caveat must precede the findings");
         assert!(md.contains("25%"), "the actual rate must be stated");
+    }
+
+    #[test]
+    fn both_artifacts_distinguish_a_read_edge_from_a_guessed_one() {
+        // A single resolution rate says how much of the graph is missing; it
+        // cannot say how much of what remains was guessed. Both numbers have to
+        // reach a reader, or the picture presents an inference with the same
+        // authority as a fact.
+        let mut f = Fake::default();
+        let a = MemoryRef(new_id());
+        let b = MemoryRef(new_id());
+        let c = MemoryRef(new_id());
+        f.syms = vec![
+            (a, "caller".into(), "src/a.rs".into(), SymbolKind::Function),
+            (b, "helper".into(), "src/a.rs".into(), SymbolKind::Function),
+            (c, "format".into(), "src/b.rs".into(), SymbolKind::Function),
+        ];
+        f.links.insert(a, vec![b, c]);
+        let g = CodeGraph::build(&f, &[], GraphConfig::default());
+        assert_eq!(g.binding_split(), (1, 1), "one same-file, one cross-file");
+
+        let md = render_markdown(&g, "demo", &stats(2));
+        assert!(md.contains("1 edges read, 1 inferred"), "got: {md}");
+
+        // The HTML gets the raw flag rather than a rendered sentence, because
+        // the viewer draws inferred edges dashed.
+        let html = render_html(&g, "demo", &stats(2));
+        assert!(html.contains("\"binding\":\"inferred\""));
+        assert!(html.contains("\"binding\":\"extracted\""));
     }
 
     #[test]

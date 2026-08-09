@@ -199,15 +199,24 @@
     X.translate(W/2 + cam.x, H/2 + cam.y);
     X.scale(cam.k, cam.k);
 
+    // Two passes: solid for edges read from the source, dashed for edges the
+    // resolver inferred from a unique name. Drawing them identically would
+    // present a guess with the same authority as a fact.
     X.lineWidth = 0.6 / cam.k;
-    X.strokeStyle = "rgba(255,255,255,.11)";
-    X.beginPath();
-    for (var i = 0; i < edges.length; i++) {
-      var e = edges[i];
-      if (hover && e.a !== hover && e.b !== hover) continue;
-      X.moveTo(e.a.x, e.a.y); X.lineTo(e.b.x, e.b.y);
+    for (var pass = 0; pass < 2; pass++) {
+      var dashed = pass === 1;
+      X.setLineDash(dashed ? [3 / cam.k, 3 / cam.k] : []);
+      X.strokeStyle = dashed ? "rgba(255,255,255,.07)" : "rgba(255,255,255,.13)";
+      X.beginPath();
+      for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
+        if (!!e.inferred !== dashed) continue;
+        if (hover && e.a !== hover && e.b !== hover) continue;
+        X.moveTo(e.a.x, e.a.y); X.lineTo(e.b.x, e.b.y);
+      }
+      X.stroke();
     }
-    X.stroke();
+    X.setLineDash([]);
 
     if (hover) {                       // dim everything, then re-draw the focus
       X.strokeStyle = "rgba(45,212,191,.55)";
@@ -341,10 +350,12 @@
     document.getElementById("repo").textContent = d.repo;
 
     var res = d.resolution.seen ? Math.round(d.resolution.resolved / d.resolution.seen * 100) : null;
+    var inferred = d.edges.filter(function (e) { return e.binding === "inferred"; }).length;
     document.getElementById("kpis").innerHTML =
       k(d.total_symbols.toLocaleString(), "symbols · " + d.files + " files") +
       k(d.edges.length.toLocaleString(), "resolved calls") +
-      k(d.communities, "communities") +
+      k((d.edges.length - inferred).toLocaleString() + " / " + inferred.toLocaleString(),
+        "read / inferred") +
       k(res === null ? "—" : res + "%", "of calls resolved");
 
     rows(d.hubs, document.getElementById("hubs"), false);
@@ -378,7 +389,9 @@
       });
       byId[n.id] = o; return o;
     });
-    edges = d.edges.map(function (e) { return { a: byId[e.from], b: byId[e.to] }; })
+    edges = d.edges.map(function (e) {
+                     return { a: byId[e.from], b: byId[e.to], inferred: e.binding === "inferred" };
+                   })
                    .filter(function (e) { return e.a && e.b; });
     alpha = 1;
 
@@ -406,6 +419,10 @@
     } else {
       L.innerHTML = '<span>one colour per detected community — node size is how many symbols call it</span>';
     }
+    // Edge style is independent of the node colouring, so it is appended to
+    // every mode rather than owned by one of them.
+    L.innerHTML += '<span style="opacity:.75">solid = call read from the source' +
+      ' &nbsp;·&nbsp; dashed = inferred from a unique name (a guess)</span>';
   }
 
   // The graph is baked in at generation time. No fetch, no server, no

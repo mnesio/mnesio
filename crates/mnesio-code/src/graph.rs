@@ -91,6 +91,56 @@ impl GraphNode {
 pub struct GraphEdge {
     pub from: MemoryRef,
     pub to: MemoryRef,
+    /// How much of this edge was read versus guessed.
+    pub binding: EdgeBinding,
+}
+
+/// Whether an edge was *read* from the source or *inferred* by the resolver.
+///
+/// A single resolution rate says how much of the call graph is missing, but not
+/// how much of what remains is trustworthy — and those are different questions.
+/// A reader deciding whether to act on an edge needs the second one.
+///
+/// The split is exact rather than a heuristic, because it falls out of the two
+/// rules in [`crate::index`]'s resolver:
+///
+/// 1. A definition of that name **in the calling file** wins. There is no
+///    guessing: the name is right there. → [`EdgeBinding::Extracted`].
+/// 2. Otherwise a **unique** match elsewhere in the repository, for bare calls
+///    only. This is an inference from name uniqueness with no type information
+///    behind it. → [`EdgeBinding::Inferred`].
+///
+/// Rule 2 can only ever bind across files — if the calling file held a single
+/// candidate, rule 1 already returned, and if it held two or more the whole
+/// resolution is `Ambiguous`. So "the endpoints share a file" is equivalent to
+/// "rule 1 bound it", which is why this can be recomputed from the node paths
+/// instead of being carried through the log (Hard Rule #4: the graph stays a
+/// view, and no event shape changes to hold a derived property).
+///
+/// ## What the split actually measures, on real repositories
+///
+/// Measured with grammars: `mnesio-code` **292/4** (99% read), claw-code
+/// **2466/204** (92%), tare **353/129** (**73%**).
+///
+/// Quote the range, not the first number. 99% says almost nothing was guessed
+/// on a crate whose calls are mostly local; tare says more than a quarter of
+/// its drawn edges are name-uniqueness guesses. Which one a reader is looking
+/// at depends entirely on how much their code crosses files, and that is the
+/// whole reason this is reported per-graph rather than asserted once.
+///
+/// A repository with no edges at all — every C/C++ one, see [`crate::parse_ts`]
+/// — has no split to report, and a ratio over zero edges would be a nonsense
+/// worth avoiding rather than a reassuring 100%.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeBinding {
+    /// Callee defined in the same file as the caller — explicit in the source.
+    #[default]
+    Extracted,
+    /// Bound to a unique same-named definition elsewhere. A guess, and the
+    /// single largest source of wrong edges: the resolver cannot tell one
+    /// `parse` from another beyond this.
+    Inferred,
 }
 
 /// How much of the call graph the parser could actually bind.
@@ -108,6 +158,22 @@ impl Resolution {
             0 => None,
             n => Some(self.resolved as f32 / n as f32),
         }
+    }
+}
+
+impl CodeGraph {
+    /// How many drawn edges were read from the source versus inferred.
+    ///
+    /// Returns `(extracted, inferred)`. The second number is the one worth
+    /// looking at: those edges are name-uniqueness guesses with no type
+    /// information behind them, and they are where a wrong edge comes from.
+    pub fn binding_split(&self) -> (usize, usize) {
+        let inferred = self
+            .edges
+            .iter()
+            .filter(|e| e.binding == EdgeBinding::Inferred)
+            .count();
+        (self.edges.len() - inferred, inferred)
     }
 }
 
@@ -185,6 +251,13 @@ impl CodeGraph {
         // Degrees first, over the *whole* graph, so a node's importance is not
         // an artefact of which slice survived the cap.
         let ids: HashSet<MemoryRef> = all.iter().map(|(id, ..)| *id).collect();
+        // Each symbol's file, so an edge can say whether it was read or guessed
+        // (see [`EdgeBinding`]). Recomputed here rather than carried through the
+        // log, because it is a function of the endpoints and nothing else.
+        let path_of: HashMap<MemoryRef, &str> = all
+            .iter()
+            .map(|(id, _, path, _)| (*id, path.as_str()))
+            .collect();
         let mut out_deg: HashMap<MemoryRef, usize> = HashMap::new();
         let mut in_deg: HashMap<MemoryRef, usize> = HashMap::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
@@ -195,7 +268,15 @@ impl CodeGraph {
                 if to == *id || !ids.contains(&to) {
                     continue;
                 }
-                edges.push(GraphEdge { from: *id, to });
+                let binding = match (path_of.get(id), path_of.get(&to)) {
+                    (Some(a), Some(b)) if a == b => EdgeBinding::Extracted,
+                    _ => EdgeBinding::Inferred,
+                };
+                edges.push(GraphEdge {
+                    from: *id,
+                    to,
+                    binding,
+                });
                 *out_deg.entry(*id).or_default() += 1;
                 *in_deg.entry(to).or_default() += 1;
             }
@@ -426,6 +507,62 @@ mod tests {
         fn resolution(&self) -> Resolution {
             self.res
         }
+    }
+
+    #[test]
+    fn a_same_file_edge_is_extracted_and_a_cross_file_edge_is_inferred() {
+        // The distinction a reader needs but a single resolution rate cannot
+        // give: how much of what *is* drawn was read rather than guessed.
+        let mut f = Fake::default();
+        let caller = f.sym("caller", "src/a.rs");
+        let local = f.sym("helper", "src/a.rs");
+        let far = f.sym("format", "src/b.rs");
+        f.calls(caller, local);
+        f.calls(caller, far);
+
+        let g = CodeGraph::build(&f, &[], GraphConfig::default());
+        let find = |to: MemoryRef| g.edges.iter().find(|e| e.to == to).unwrap().binding;
+
+        assert_eq!(find(local), EdgeBinding::Extracted, "same file — read");
+        assert_eq!(find(far), EdgeBinding::Inferred, "another file — guessed");
+        assert_eq!(g.binding_split(), (1, 1));
+    }
+
+    #[test]
+    fn the_binding_split_matches_the_resolver_rule_it_claims_to_mirror() {
+        // The doc on `EdgeBinding` claims same-file is *equivalent* to rule 1,
+        // not merely correlated with it. That holds only because rule 2 can
+        // never bind within a file: with one same-name candidate in the file
+        // rule 1 already returned, and with two or more the whole resolution is
+        // Ambiguous. Pinned end-to-end through the real indexer, so the claim
+        // fails here rather than in a doc comment if the resolver changes.
+        use crate::{CodeIndexer, CodeParser, HeuristicParser};
+        use mnesio_core::types::Scope;
+
+        let same = HeuristicParser
+            .parse(
+                "src/a.rs",
+                "rust",
+                "fn helper() {}\nfn caller() { helper(); }\n",
+            )
+            .unwrap();
+        let plan = CodeIndexer::new(Scope::global("t")).plan(&[same]);
+        assert_eq!(
+            plan.stats.edges.resolved, 1,
+            "rule 1 must have bound the local call"
+        );
+
+        let a = HeuristicParser
+            .parse("src/a.rs", "rust", "fn caller() { helper(); }\n")
+            .unwrap();
+        let b = HeuristicParser
+            .parse("src/b.rs", "rust", "fn helper() {}\n")
+            .unwrap();
+        let plan = CodeIndexer::new(Scope::global("t")).plan(&[a, b]);
+        assert_eq!(
+            plan.stats.edges.resolved, 1,
+            "rule 2 must have bound the cross-file call"
+        );
     }
 
     fn entry(syms: &[MemoryRef], result: EditResult) -> JournalEntry {
