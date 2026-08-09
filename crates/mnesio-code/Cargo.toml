@@ -24,7 +24,15 @@ default = []
 # (`@definition.function`, `@reference.call`, …) upstream.
 tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript", "dep:tree-sitter-go", "dep:tree-sitter-java", "dep:tree-sitter-c", "dep:tree-sitter-cpp", "dep:tree-sitter-c-sharp", "dep:tree-sitter-ruby", "dep:tree-sitter-php", "dep:tree-sitter-swift", "dep:tree-sitter-lua", "dep:tree-sitter-elixir", "dep:tree-sitter-ocaml", "dep:tree-sitter-r", "dep:tree-sitter-dart", "dep:tree-sitter-solidity", "dep:tree-sitter-elm", "dep:tree-sitter-kotlin-ng", "dep:tree-sitter-zig", "dep:tree-sitter-haskell", "dep:tree-sitter-julia", "dep:tree-sitter-objc", "dep:tree-sitter-hcl", "dep:tree-sitter-scala", "dep:tree-sitter-bash"]
 
+[[bin]]
+name = "mnesio-code"
+path = "src/bin/mnesio-code.rs"
+# The CLI needs an async runtime and a real embedder; the library itself does
+# not, so these stay out of the default dependency set for library consumers.
+required-features = []
+
 [dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 async-trait.workspace = true
 mnesio-core.workspace = true
 # `CodeMemory` assembles retrieval, so it needs the index views. Acyclic:

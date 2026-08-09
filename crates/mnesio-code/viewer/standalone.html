@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mnesio — code map</title>
+<style>
+  :root {
+    --bg:#06070c; --panel:#0c0e14; --line:#232836; --ink:#e6e9ef;
+    --muted:#9aa3b2; --dim:#697182; --teal:#2dd4bf; --green:#3fb950;
+    --amber:#d29922; --red:#f85149; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 "Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  #stage{position:fixed;inset:0}
+  canvas{display:block;cursor:grab}
+  canvas.dragging{cursor:grabbing}
+
+  .float{position:fixed;background:rgba(12,14,20,.92);border:1px solid var(--line);
+         border-radius:12px;backdrop-filter:blur(12px)}
+  #hud{top:16px;left:16px;width:320px;max-height:calc(100vh - 32px);overflow-y:auto;padding:16px}
+  #hud h1{margin:0 0 2px;font-size:15px;letter-spacing:-.01em}
+  #repo{font-family:var(--mono);font-size:11px;color:var(--dim);word-break:break-all;margin-bottom:14px}
+
+  .kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+  .k{background:#080a10;border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+  .k b{display:block;font-size:17px;font-weight:650;letter-spacing:-.02em}
+  .k span{font-size:10.5px;color:var(--dim)}
+
+  h2{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
+     margin:16px 0 8px;font-weight:600}
+  .row{display:flex;justify-content:space-between;gap:8px;padding:5px 0;
+       border-bottom:1px solid rgba(255,255,255,.045);font-size:12px;cursor:pointer}
+  .row:hover .nm{color:var(--teal)}
+  .nm{font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meta{font-family:var(--mono);font-size:10.5px;color:var(--dim);flex:none}
+
+  .warn{border:1px solid #3a2f22;background:#15100a;border-radius:9px;padding:11px 12px;
+        font-size:11.5px;color:#d8c9a8;line-height:1.55;margin-top:14px}
+  .warn b{color:#f0d9a8}
+  .empty{font-size:11.5px;color:var(--dim);padding:4px 0 8px;line-height:1.5}
+
+  #ctl{top:16px;right:16px;padding:12px 14px;display:flex;flex-direction:column;gap:9px;width:200px}
+  label{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:7px;cursor:pointer}
+  select,input[type=range]{width:100%;background:#080a10;border:1px solid var(--line);
+    color:var(--ink);border-radius:6px;padding:5px 7px;font:inherit;font-size:12px}
+  #legend{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted);
+          margin-top:4px;padding-top:9px;border-top:1px solid var(--line)}
+  #legend i{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:7px;vertical-align:-1px}
+
+  #tip{position:fixed;pointer-events:none;background:rgba(6,7,12,.97);border:1px solid var(--line);
+       border-radius:8px;padding:9px 11px;font-size:12px;display:none;max-width:320px;z-index:20}
+  #tip .t{font-family:var(--mono);color:var(--teal);font-size:12px}
+  #tip .p{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin:3px 0 6px;word-break:break-all}
+  #tip .s{font-size:11.5px;color:var(--muted)}
+
+  #status{bottom:16px;left:16px;padding:10px 14px;font-size:12px;color:var(--muted);max-width:60vw}
+  a{color:var(--teal)}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+
+<div id="hud" class="float">
+  <h1>Code graph</h1>
+  <div id="repo">—</div>
+  <div class="kpis" id="kpis"></div>
+
+  <h2>Most depended on</h2>
+  <div id="hubs"><div class="empty">loading…</div></div>
+
+  <h2>Retrieved, never helps</h2>
+  <div id="unhelpful"></div>
+
+  <div class="warn" id="caveat"></div>
+</div>
+
+<div id="ctl" class="float">
+  <label>Colour by</label>
+  <select id="mode">
+    <option value="community">community (structure)</option>
+    <option value="evidence">evidence (did it help)</option>
+    <option value="kind">symbol kind</option>
+  </select>
+  <label><input type="checkbox" id="connected" /> hide unconnected</label>
+  <label>Max nodes <span id="capv" class="meta">1500</span></label>
+  <input type="range" id="cap" min="100" max="5000" step="100" value="1500" />
+  <div id="legend"></div>
+</div>
+
+<div id="tip"></div>
+<div id="status" class="float">indexing…</div>
+
+<script>
+(function () {
+  var C = document.getElementById("c"), X = C.getContext("2d");
+  var W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
+  var nodes = [], edges = [], data = null;
+  var cam = { x: 0, y: 0, k: 1 }, hover = null, dragging = null, panning = null;
+  var mode = "community";
+
+  // Distinct hues, spaced far enough apart that adjacent communities are
+  // actually distinguishable rather than merely different.
+  var PALETTE = ["#2dd4bf","#818cf8","#f472b6","#fbbf24","#4ade80","#38bdf8",
+                 "#c084fc","#fb923c","#a3e635","#f87171","#22d3ee","#e879f9"];
+
+  function resize() {
+    W = innerWidth; H = innerHeight;
+    C.width = W * DPR; C.height = H * DPR;
+    C.style.width = W + "px"; C.style.height = H + "px";
+    X.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  addEventListener("resize", function () { resize(); draw(); });
+  resize();
+
+  function esc(s){return String(s).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];});}
+  function pct(r){return r === null || r === undefined ? "—" : Math.round(r*100)+"%";}
+
+  // ---- colour ------------------------------------------------------------
+  // Evidence mode deliberately renders "no evidence" as grey, never as a
+  // low score. A symbol nobody has retrieved is unmeasured, not failing, and
+  // a continuous scale that started at red would libel most of the codebase.
+  function colour(n) {
+    if (mode === "community") return PALETTE[n.community % PALETTE.length];
+    if (mode === "kind") {
+      var K = {function:"#2dd4bf",method:"#38bdf8",struct:"#fbbf24",class:"#fb923c",
+               enum:"#c084fc",trait:"#f472b6",type_alias:"#a3e635",constant:"#94a3b8",
+               module:"#818cf8",test:"#4ade80"};
+      return K[n.kind] || "#94a3b8";
+    }
+    var r = n.evidence.success_rate;
+    if (r === null || r === undefined) return "#39414f";
+    return r >= 0.7 ? "#3fb950" : r >= 0.4 ? "#d29922" : "#f85149";
+  }
+  function radius(n) { return 3 + Math.sqrt(n.in_degree) * 1.9; }
+
+  // ---- layout ------------------------------------------------------------
+  // A hand-rolled force simulation: Barnes-Hut would be faster but needs a
+  // library, and this page must stay dependency-free like the rest of the
+  // dashboard. Repulsion is capped to a neighbourhood so cost stays linear-ish.
+  var alpha = 1;
+  function step() {
+    if (alpha < 0.005) return;
+    var i, j, a, b, dx, dy, d, f;
+
+    // Grid-bucketed repulsion — only compare nodes that are already close.
+    var cell = 60, grid = {};
+    for (i = 0; i < nodes.length; i++) {
+      a = nodes[i];
+      var key = ((a.x / cell) | 0) + ":" + ((a.y / cell) | 0);
+      (grid[key] || (grid[key] = [])).push(a);
+    }
+    for (var key in grid) {
+      var parts = key.split(":"), cx = +parts[0], cy = +parts[1], near = [];
+      for (var ox = -1; ox <= 1; ox++) for (var oy = -1; oy <= 1; oy++) {
+        var g = grid[(cx+ox) + ":" + (cy+oy)];
+        if (g) near = near.concat(g);
+      }
+      var here = grid[key];
+      for (i = 0; i < here.length; i++) {
+        a = here[i];
+        for (j = 0; j < near.length; j++) {
+          b = near[j];
+          if (a === b) continue;
+          dx = a.x - b.x; dy = a.y - b.y;
+          d = dx*dx + dy*dy;
+          if (d < 1e-4) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d = 1; }
+          if (d > cell*cell*4) continue;
+          f = 260 / d;
+          a.vx += dx * f; a.vy += dy * f;
+        }
+      }
+    }
+
+    for (i = 0; i < edges.length; i++) {
+      a = edges[i].a; b = edges[i].b;
+      dx = b.x - a.x; dy = b.y - a.y;
+      d = Math.sqrt(dx*dx + dy*dy) || 1;
+      f = (d - 42) * 0.012;
+      dx = dx / d * f; dy = dy / d * f;
+      a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
+    }
+
+    for (i = 0; i < nodes.length; i++) {
+      a = nodes[i];
+      a.vx -= a.x * 0.0015; a.vy -= a.y * 0.0015;   // gentle centring
+      if (a === dragging) { a.vx = a.vy = 0; continue; }
+      a.vx *= 0.86; a.vy *= 0.86;
+      a.x += Math.max(-25, Math.min(25, a.vx));
+      a.y += Math.max(-25, Math.min(25, a.vy));
+    }
+    alpha *= 0.985;
+  }
+
+  function draw() {
+    X.clearRect(0, 0, W, H);
+    X.save();
+    X.translate(W/2 + cam.x, H/2 + cam.y);
+    X.scale(cam.k, cam.k);
+
+    X.lineWidth = 0.6 / cam.k;
+    X.strokeStyle = "rgba(255,255,255,.11)";
+    X.beginPath();
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      if (hover && e.a !== hover && e.b !== hover) continue;
+      X.moveTo(e.a.x, e.a.y); X.lineTo(e.b.x, e.b.y);
+    }
+    X.stroke();
+
+    if (hover) {                       // dim everything, then re-draw the focus
+      X.strokeStyle = "rgba(45,212,191,.55)";
+      X.lineWidth = 1.2 / cam.k;
+      X.beginPath();
+      for (i = 0; i < edges.length; i++) {
+        var f = edges[i];
+        if (f.a !== hover && f.b !== hover) continue;
+        X.moveTo(f.a.x, f.a.y); X.lineTo(f.b.x, f.b.y);
+      }
+      X.stroke();
+    }
+
+    for (i = 0; i < nodes.length; i++) {
+      var n = nodes[i], r = radius(n);
+      X.beginPath();
+      X.arc(n.x, n.y, r, 0, 6.2832);
+      X.fillStyle = colour(n);
+      X.globalAlpha = hover && n !== hover && !n._adj ? 0.22 : 1;
+      X.fill();
+      if (n === hover) { X.lineWidth = 2/cam.k; X.strokeStyle = "#fff"; X.stroke(); }
+      X.globalAlpha = 1;
+    }
+
+    // Label only what is big enough to read — a label on every node at low
+    // zoom is a grey rectangle, not information.
+    if (cam.k > 0.75) {
+      X.fillStyle = "rgba(230,233,239,.82)";
+      X.font = (10/cam.k) + "px ui-monospace,monospace";
+      for (i = 0; i < nodes.length; i++) {
+        var m = nodes[i];
+        if (m.in_degree < 2 && m !== hover) continue;
+        X.fillText(m.name, m.x + radius(m) + 3/cam.k, m.y + 3/cam.k);
+      }
+    }
+    X.restore();
+  }
+
+  function loop() { step(); draw(); requestAnimationFrame(loop); }
+
+  // ---- interaction -------------------------------------------------------
+  function toWorld(px, py) {
+    return { x: (px - W/2 - cam.x) / cam.k, y: (py - H/2 - cam.y) / cam.k };
+  }
+  function pick(px, py) {
+    var w = toWorld(px, py), best = null, bd = 1e9;
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i], dx = n.x - w.x, dy = n.y - w.y, d = dx*dx + dy*dy;
+      var rr = radius(n) + 4;
+      if (d < rr*rr && d < bd) { bd = d; best = n; }
+    }
+    return best;
+  }
+  C.addEventListener("mousemove", function (e) {
+    if (panning) {
+      cam.x += e.clientX - panning.x; cam.y += e.clientY - panning.y;
+      panning = { x: e.clientX, y: e.clientY }; return;
+    }
+    if (dragging) {
+      var w = toWorld(e.clientX, e.clientY);
+      dragging.x = w.x; dragging.y = w.y; alpha = Math.max(alpha, 0.25); return;
+    }
+    var n = pick(e.clientX, e.clientY);
+    if (n !== hover) {
+      if (hover) hover._adj = false;
+      nodes.forEach(function (m) { m._adj = false; });
+      hover = n;
+      if (n) edges.forEach(function (f) {
+        if (f.a === n) f.b._adj = true; else if (f.b === n) f.a._adj = true;
+      });
+    }
+    var tip = document.getElementById("tip");
+    if (n) {
+      var ev = n.evidence;
+      tip.style.display = "block";
+      tip.style.left = Math.min(e.clientX + 14, W - 340) + "px";
+      tip.style.top  = (e.clientY + 14) + "px";
+      tip.innerHTML =
+        '<div class="t">' + esc(n.name) + '</div>' +
+        '<div class="p">' + esc(n.path) + ' · ' + esc(n.kind) + '</div>' +
+        '<div class="s">' + n.in_degree + ' callers · ' + n.out_degree + ' callees<br>' +
+        (ev.retrievals
+          ? 'retrieved ' + ev.retrievals + '× · ' + ev.successes + ' good, ' + ev.failures +
+            ' bad · <b>' + pct(ev.success_rate) + '</b>'
+          : '<span style="color:#697182">never retrieved — unmeasured, not bad</span>') +
+        '</div>';
+    } else tip.style.display = "none";
+  });
+  C.addEventListener("mousedown", function (e) {
+    var n = pick(e.clientX, e.clientY);
+    if (n) { dragging = n; C.classList.add("dragging"); }
+    else { panning = { x: e.clientX, y: e.clientY }; C.classList.add("dragging"); }
+  });
+  addEventListener("mouseup", function () { dragging = panning = null; C.classList.remove("dragging"); });
+  C.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    var k = Math.exp(-e.deltaY * 0.0016);
+    cam.k = Math.max(0.08, Math.min(6, cam.k * k));
+  }, { passive: false });
+
+  function focus(name, path) {
+    var n = nodes.find(function (m) { return m.name === name && m.path === path; });
+    if (!n) return;
+    cam.k = 1.9; cam.x = -n.x * cam.k; cam.y = -n.y * cam.k;
+    hover = n;
+    nodes.forEach(function (m) { m._adj = false; });
+    edges.forEach(function (f) { if (f.a === n) f.b._adj = true; else if (f.b === n) f.a._adj = true; });
+  }
+
+  // ---- data --------------------------------------------------------------
+  function rows(list, el, showRate) {
+    if (!list.length) {
+      el.innerHTML = '<div class="empty">' + (showRate
+        ? "Nothing yet. This list needs enough recorded outcomes to tell an unhelpful symbol from an unlucky one — it stays empty rather than guessing."
+        : "No resolved edges yet.") + '</div>';
+      return;
+    }
+    el.innerHTML = list.map(function (h) {
+      return '<div class="row" data-n="' + esc(h.name) + '" data-p="' + esc(h.path) + '">' +
+        '<span class="nm">' + esc(h.name) + '</span>' +
+        '<span class="meta">' + (showRate ? pct(h.success_rate) + " · " + h.retrievals + "×"
+                                          : "←" + h.in_degree) + '</span></div>';
+    }).join("");
+    el.querySelectorAll(".row").forEach(function (r) {
+      r.addEventListener("click", function () { focus(r.dataset.n, r.dataset.p); });
+    });
+  }
+
+  function render(d) {
+    data = d;
+    document.getElementById("repo").textContent = d.repo;
+
+    var res = d.resolution.seen ? Math.round(d.resolution.resolved / d.resolution.seen * 100) : null;
+    document.getElementById("kpis").innerHTML =
+      k(d.total_symbols.toLocaleString(), "symbols · " + d.files + " files") +
+      k(d.edges.length.toLocaleString(), "resolved calls") +
+      k(d.communities, "communities") +
+      k(res === null ? "—" : res + "%", "of calls resolved");
+
+    rows(d.hubs, document.getElementById("hubs"), false);
+    var unhelpful = (d.nodes || []).filter(function (n) {
+      var e = n.evidence || {};
+      return (e.successes + e.failures) >= 5 && e.success_rate !== null
+             && e.success_rate !== undefined && e.success_rate <= 0.2;
+    }).map(function (n) {
+      return { name: n.name, path: n.path, in_degree: n.in_degree,
+               success_rate: n.evidence.success_rate,
+               retrievals: n.evidence.retrievals };
+    });
+    rows(unhelpful, document.getElementById("unhelpful"), true);
+
+    var warn = "<b>Read this with the picture.</b> " + esc(d.resolution_caveat);
+    if (d.truncated > 0) {
+      warn += "<br><br><b>Showing " + d.nodes.length.toLocaleString() + " of " +
+        d.total_symbols.toLocaleString() + " symbols</b> (highest-degree kept). " +
+        "This is a subgraph, not your repository.";
+    }
+    document.getElementById("caveat").innerHTML = warn;
+
+    // Seed positions on a circle by community, so the simulation starts from a
+    // structured state and settles in a second rather than untangling a knot.
+    var byId = {};
+    nodes = d.nodes.map(function (n, i) {
+      var ang = (n.community * 2.399) + (i % 17) * 0.09;
+      var rad = 120 + (i % 40) * 7;
+      var o = Object.assign({}, n, {
+        x: Math.cos(ang) * rad, y: Math.sin(ang) * rad, vx: 0, vy: 0, _adj: false
+      });
+      byId[n.id] = o; return o;
+    });
+    edges = d.edges.map(function (e) { return { a: byId[e.from], b: byId[e.to] }; })
+                   .filter(function (e) { return e.a && e.b; });
+    alpha = 1;
+
+    document.getElementById("status").innerHTML =
+      d.nodes.length.toLocaleString() + " nodes · " + edges.length.toLocaleString() +
+      " edges · drag to pan, scroll to zoom, hover a node for its evidence · generated by mnesio-code";
+  }
+  function k(v, l) { return '<div class="k"><b>' + v + '</b><span>' + l + '</span></div>'; }
+
+  function legend() {
+    var L = document.getElementById("legend");
+    if (mode === "evidence") {
+      L.innerHTML =
+        '<span><i style="background:#3fb950"></i>helped ≥70%</span>' +
+        '<span><i style="background:#d29922"></i>40–70%</span>' +
+        '<span><i style="background:#f85149"></i>below 40%</span>' +
+        '<span><i style="background:#39414f"></i>never retrieved (unmeasured)</span>';
+    } else if (mode === "kind") {
+      L.innerHTML =
+        '<span><i style="background:#2dd4bf"></i>function</span>' +
+        '<span><i style="background:#38bdf8"></i>method</span>' +
+        '<span><i style="background:#fbbf24"></i>struct</span>' +
+        '<span><i style="background:#f472b6"></i>trait</span>' +
+        '<span><i style="background:#4ade80"></i>test</span>';
+    } else {
+      L.innerHTML = '<span>one colour per detected community — node size is how many symbols call it</span>';
+    }
+  }
+
+  // The graph is baked in at generation time. No fetch, no server, no
+  // network — the file works from a USB stick or an email attachment, which
+  // is the entire reason it exists as a file rather than a route.
+  var PAYLOAD = {{DATA}};
+
+  function load() {
+    var d = PAYLOAD.graph;
+    d.repo = PAYLOAD.repo;
+    d.files = PAYLOAD.files;
+    d.hubs = PAYLOAD.hubs;
+    d.resolution_caveat = PAYLOAD.resolution_caveat;
+    // A static artifact cannot re-query with different bounds, so the
+    // controls that would need a round trip are disabled rather than left
+    // looking live and doing nothing.
+    document.getElementById("connected").disabled = true;
+    document.getElementById("cap").disabled = true;
+    render(d);
+  }
+
+  document.getElementById("mode").addEventListener("change", function (e) { mode = e.target.value; legend(); });
+  document.getElementById("connected").addEventListener("change", load);
+  document.getElementById("cap").addEventListener("input", function (e) {
+    document.getElementById("capv").textContent = e.target.value;
+  });
+  document.getElementById("cap").addEventListener("change", load);
+
+  legend(); load(); loop();
+})();
+</script>
+</body>
+</html>

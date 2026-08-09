@@ -48,6 +48,7 @@ pub mod parse;
 #[cfg(feature = "tree-sitter")]
 pub mod parse_ts;
 pub mod persist;
+pub mod report;
 
 pub use curve::{CurvePoint, LiveCurve};
 pub use graph::{CodeGraph, GraphConfig, GraphEdge, GraphNode, GraphSource, NodeEvidence};
