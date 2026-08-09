@@ -1,0 +1,108 @@
+name: corpus
+
+# Phase 18H: the code-retrieval corpus, run on a schedule rather than on every
+# push.
+#
+# Deliberately NOT part of `ci.yml`. It clones ten external repositories and
+# takes minutes, so gating every pull request on it would make CI depend on
+# GitHub being reachable and on other people's servers being up. A benchmark
+# that can fail for reasons unrelated to the change under review teaches
+# contributors to ignore red, which costs more than it catches.
+#
+# It also does not fail on a regression, and that is not laziness. The measured
+# noise floor for this corpus is 2pp per repository (`manifest run --repeat 3`),
+# so a threshold tight enough to catch a real change would flap on index-build
+# randomness, and one loose enough not to flap would catch nothing. Until the
+# floor narrows, this job's job is to *produce the numbers*, and a human reads
+# them against `manifest/codeeval-v1-results.md`.
+#
+# What it does catch, by failing: the corpus becoming unrunnable. A pin that
+# vanishes, a repository that reorganises out from under its `subdir`, a
+# manifest that stops parsing. Those are real breakages and they are silent
+# otherwise — the suite would simply start measuring fewer repositories.
+
+on:
+  schedule:
+    # Weekly. The corpus is pinned, so the numbers only move when mnesio does;
+    # a nightly run would mostly re-measure the same commits.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: "Identical runs, to re-measure the noise floor"
+        default: "1"
+        required: false
+
+concurrency:
+  group: corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  codeeval:
+    name: codeeval-v1
+    runs-on: ubuntu-latest
+    # Generous relative to the ~300s observed locally: a cold cargo build plus
+    # ten clones on a shared runner is a different machine from a warm laptop.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The trace cache is keyed by repository HEAD, and the corpus is pinned,
+      # so it stays valid until a pin changes. That turns the expensive
+      # `git log -L` tracing into a one-off cost across scheduled runs.
+      - name: Restore git-trace cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mnesio-gitsuite
+          key: gitsuite-${{ hashFiles('crates/mnesio-bench/manifest/codeeval-v1.pinned.json') }}
+
+      - name: Build the harness
+        run: cargo build --release -p mnesio-bench --bin mnesio-bench
+
+      - name: Run the corpus
+        run: |
+          ./target/release/mnesio-bench manifest run \
+            --manifest crates/mnesio-bench/manifest/codeeval-v1.pinned.json \
+            --embedder mock \
+            --k 1,5,20 \
+            --work "$RUNNER_TEMP/corpus" \
+            --repeat "${{ github.event.inputs.repeat || '1' }}" \
+            --out "$RUNNER_TEMP/results.md"
+          cat "$RUNNER_TEMP/results.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # Fail only on a corpus that stopped being *materialisable*: a pin that
+      # vanished, a `subdir` that moved, a manifest that stopped parsing. Those
+      # are silent otherwise — the suite would simply measure fewer
+      # repositories and report a distribution over whatever survived.
+      #
+      # Deliberately NOT asserting an empty skip list. `express` is a known
+      # skip (JavaScript needs the tree-sitter feature), so that assertion
+      # would be red from the first run, and a check that is red on arrival
+      # teaches everyone to ignore it. The skip list is in the summary for a
+      # human to read.
+      - name: The corpus must still materialise
+        run: |
+          line=$(grep -E "repositories, [0-9]+ evaluated, [0-9]+ refused" "$RUNNER_TEMP/results.md" || true)
+          if [ -z "$line" ]; then
+            echo "::error::no corpus summary in the report — the run did not complete"
+            exit 1
+          fi
+          refused=$(echo "$line" | sed -E 's/.*, ([0-9]+) refused.*/\1/')
+          echo "$line"
+          if [ "$refused" != "0" ]; then
+            echo "::error::$refused repositories could not be materialised; the corpus is incomplete and its numbers are not comparable to previous runs"
+            exit 1
+          fi
+
+      - name: Publish the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeeval-v1-results
+          path: ${{ runner.temp }}/results.md
