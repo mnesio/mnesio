@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mnesio": {
+      "command": "mnesio-mcp",
+      "env": {
+        "MNESIO_EMBEDDER": "fastembed",
+        "MNESIO_DATA": "./mnesio-data"
+      }
+    }
+  }
+}
