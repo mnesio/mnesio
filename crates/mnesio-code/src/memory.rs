@@ -519,6 +519,23 @@ impl CodeMemory {
     }
 
     /// Files, symbols and edge-resolution counts from the index run.
+    /// The retriever backing this index, if it has been built.
+    ///
+    /// Exposed for harnesses that need to drive retrieval directly rather than
+    /// through [`CodeMemory::context_for`] — the learning-curve measurement
+    /// applies a suppression set to the ranked result, which the packing path
+    /// does not model.
+    pub fn retriever(&self) -> Option<&HybridRetriever> {
+        self.retriever.as_ref()
+    }
+
+    /// A symbol's `(path, name)`, for scoring a retrieval against a gold set.
+    pub fn symbol(&self, m: MemoryRef) -> Option<(&str, &str)> {
+        self.symbols
+            .get(&m)
+            .map(|s| (s.path.as_str(), s.name.as_str()))
+    }
+
     pub fn stats(&self) -> &IndexStats {
         &self.stats
     }

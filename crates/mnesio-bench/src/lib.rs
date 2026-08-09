@@ -35,6 +35,7 @@ pub use mnesio_procedural::PolicyExecutor;
 
 pub mod codeeval;
 pub mod compete;
+pub mod curveindex;
 pub mod edge;
 #[cfg(feature = "fetch")]
 pub mod fetch;

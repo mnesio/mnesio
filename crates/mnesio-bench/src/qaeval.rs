@@ -61,7 +61,7 @@ impl QaReport {
     }
 }
 
-fn build_embedder(choice: &str) -> Result<Arc<dyn Embedder>> {
+pub fn build_embedder(choice: &str) -> Result<Arc<dyn Embedder>> {
     match choice {
         "mock" => Ok(Arc::new(MockEmbedder::new(MOCK_DIM))),
         "fastembed" => Ok(Arc::new(

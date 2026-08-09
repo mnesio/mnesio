@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
         Command::CodeEval(opts) => cmd_codeeval(opts).await,
         Command::ScaleEval(opts) => cmd_scaleeval(opts).await,
         Command::Manifest(opts) => cmd_manifest(opts).await,
+        Command::LearnCurve(opts) => cmd_learncurve(opts).await,
         Command::Scale(opts) => cmd_scale(opts).await,
         Command::Compete(opts) => cmd_compete(opts).await,
         Command::QaEval(opts) => cmd_qaeval(opts).await,
@@ -1141,6 +1142,7 @@ enum Command {
     CodeEval(CodeEvalOpts),
     ScaleEval(ScaleEvalOpts),
     Manifest(ManifestOpts),
+    LearnCurve(LearnCurveOpts),
     Scale(ScaleOpts),
     Compete(CompeteOpts),
     QaEval(QaEvalOpts),
@@ -1302,6 +1304,10 @@ fn parse_args() -> Result<RootArgs> {
             iter.next();
             "manifest"
         }
+        Some("learncurve") => {
+            iter.next();
+            "learncurve"
+        }
         Some("edge") => {
             iter.next();
             "edge"
@@ -1334,6 +1340,9 @@ fn parse_args() -> Result<RootArgs> {
         }),
         "manifest" => Ok(RootArgs {
             command: Command::Manifest(parse_manifest(iter)?),
+        }),
+        "learncurve" => Ok(RootArgs {
+            command: Command::LearnCurve(parse_learncurve(iter)?),
         }),
         "memeval" => Ok(RootArgs {
             command: Command::MemEval(parse_memeval(iter)?),
@@ -1667,6 +1676,127 @@ fn parse_manifest(
         }
     }
     Ok(o)
+}
+
+/// `learncurve` — does gated retrieval learning move held-out recall?
+struct LearnCurveOpts {
+    dir: String,
+    embedder: String,
+    k: usize,
+    queries: usize,
+    /// Identical runs. A single run is one sample; the delta has to be
+    /// compared against how much the answer moves on its own.
+    repeat: usize,
+}
+
+fn parse_learncurve(
+    mut iter: std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<LearnCurveOpts> {
+    let mut o = LearnCurveOpts {
+        dir: "crates/mnesio-index/src".into(),
+        embedder: "mock".into(),
+        k: 20,
+        queries: 200,
+        repeat: 1,
+    };
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--dir" => o.dir = next_value(&mut iter, "--dir")?,
+            "--embedder" => o.embedder = next_value(&mut iter, "--embedder")?,
+            "--k" => o.k = next_value(&mut iter, "--k")?.parse()?,
+            "--queries" => o.queries = next_value(&mut iter, "--queries")?.parse()?,
+            "--repeat" => o.repeat = next_value(&mut iter, "--repeat")?.parse()?,
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => bail!("unknown argument {other:?}; pass --help for usage"),
+        }
+    }
+    Ok(o)
+}
+
+async fn cmd_learncurve(opts: LearnCurveOpts) -> Result<()> {
+    use mnesio_bench::codeeval::trace_targets;
+    use mnesio_bench::curveindex::RepoCurveIndex;
+    use mnesio_bench::gitsuite;
+    use mnesio_bench::learncurve::{format_curve, run_curve};
+    use mnesio_code::learn::LearnConfig;
+    use mnesio_code::CodeMemory;
+    use mnesio_core::Scope;
+
+    eprintln!(
+        "# mnesio-bench learncurve · dir={} · embedder={} · k={} · repeat={}",
+        opts.dir, opts.embedder, opts.k, opts.repeat
+    );
+
+    // The gold set is keyed to the git root; CodeMemory keys to the indexed
+    // directory. Compute the offset once so the two frames can be compared —
+    // a mismatch scores 0% and reads as "learned nothing".
+    let abs = std::path::Path::new(&opts.dir).canonicalize()?;
+    let prefix = mnesio_bench::codeeval::git_root(&abs)
+        .and_then(|root| {
+            abs.strip_prefix(&root)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_default();
+    if !prefix.is_empty() {
+        eprintln!("# indexed dir sits at `{prefix}` within the repository");
+    }
+
+    let targets = trace_targets(&opts.dir)?;
+    eprintln!("# tracing {} symbols through git history…", targets.len());
+    let suite = gitsuite::derive(&opts.dir, &targets, opts.queries)?;
+    if suite.is_empty() {
+        bail!("no usable suite derived from {}", opts.dir);
+    }
+    eprintln!("# {} queries derived", suite.len());
+
+    let embedder = mnesio_bench::qaeval::build_embedder(&opts.embedder)?;
+    let scope = Scope::global("curve");
+
+    let mut deltas = Vec::new();
+    let mut first: Option<String> = None;
+    for i in 0..opts.repeat.max(1) {
+        if opts.repeat > 1 {
+            eprintln!("# run {}/{}", i + 1, opts.repeat);
+        }
+        // A fresh index per run: the index build is the thing that varies, so
+        // reusing one would hide exactly the variance being measured.
+        let memory =
+            CodeMemory::index(&opts.dir, scope.clone(), std::sync::Arc::clone(&embedder)).await?;
+        let index = RepoCurveIndex::new(memory, scope.clone(), opts.k, prefix.clone());
+        let report = run_curve(&index, &suite, LearnConfig::default()).await?;
+        deltas.push(report.delta() * 100.0);
+        if first.is_none() {
+            first = Some(format_curve(&report));
+        }
+    }
+
+    println!("{}", first.unwrap_or_default());
+
+    if deltas.len() > 1 {
+        let lo = deltas.iter().cloned().fold(f32::MAX, f32::min);
+        let hi = deltas.iter().cloned().fold(f32::MIN, f32::max);
+        let mean = deltas.iter().sum::<f32>() / deltas.len() as f32;
+        // The corpus noise floor, measured separately by `manifest run
+        // --repeat`. A delta under it is not a finding however it is phrased.
+        const NOISE_PP: f32 = 2.0;
+        println!(
+            "\n## across {} runs\n\n\
+             held-out delta: mean **{mean:+.1}pp**, range {lo:+.1}pp … {hi:+.1}pp\n\n\
+             Measured noise floor for this corpus is {NOISE_PP:.0}pp. This result is \
+             **{}**.\n",
+            deltas.len(),
+            if mean.abs() > NOISE_PP {
+                "above the floor — a finding"
+            } else {
+                "UNDER THE NOISE FLOOR — not a finding, report as null"
+            }
+        );
+    }
+    Ok(())
 }
 
 async fn cmd_manifest(opts: ManifestOpts) -> Result<()> {

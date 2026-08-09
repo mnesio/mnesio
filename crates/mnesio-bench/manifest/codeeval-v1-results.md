@@ -98,3 +98,46 @@ repetition gives you that.
 Whole-file recall is the calibration: that arm never consults the call graph,
 so its variation cannot be caused by any retrieval-policy change. It is a
 clean read on index randomness alone.
+
+---
+
+## Learning curve on real repositories — the loop never fires
+
+`learncurve` runs the gated loop against a real index: split the git-derived
+suite train/canary/held-out, record outcomes on train, propose suppression
+rules, gate them against canaries, re-measure held-out.
+
+| corpus | train | outcomes | symbols | proposals | held-out before → after |
+|---|---|---|---|---|---|
+| ripgrep `crates/core` | 28 | 28 | 195 | **0** | 56% → 56% (+0.0pp) |
+| ripgrep, whole repo | 60 | 60 | 505 | **0** | 75% → 75% (+0.0pp) |
+
+**Zero proposals, at both sizes.** `LearnConfig::min_decisive` requires 5
+decisive outcomes against a symbol before it will propose suppressing it —
+deliberately, because acting on one bad result is how a loop overfits its first
+unlucky trial. The observed ratio is **0.12 outcomes per symbol**, and doubling
+the suite did not move it: more queries brought proportionally more symbols.
+
+### Why a git-derived suite structurally cannot exercise this
+
+Each query is a different commit, and commits touch different code. The suite
+therefore has **almost no repetition** — a symbol is seen once or twice and
+never revisited. Evidence accumulation needs the opposite: the same symbol
+retrieved repeatedly so a success rate can form.
+
+That is a property of the benchmark, not of the mechanism. Real agent usage has
+the repetition built in — someone works in one area for a week — but commit
+history is by construction a sequence of *different* changes. Reaching the
+threshold on this suite would need roughly **40× more outcomes per symbol**.
+
+So the wedge cannot be validated on `codeeval-v1`. It needs either recorded
+agent sessions (repetition natural, which is what the MCP outcome journal
+collects) or a workload with deliberate revisiting. The result above is
+reported as **null and unexercised** — not as evidence the loop does not work,
+and not as evidence that it does.
+
+A first run of this scored 0% before *and* after, which read as "learned
+nothing". It was a path-frame bug: gold paths are git-root-relative, `CodeMemory`
+paths are index-root-relative, so no gold ever matched. The tell was that
+`codeeval` scores 54% on the same index. Fixed; the 56%/75% baselines above are
+what the corrected measurement gives.
