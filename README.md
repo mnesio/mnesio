@@ -49,10 +49,28 @@ Two continuous loops operate over a single append-only event log:
 ## 🗺️ Map a codebase — one command, no server
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/mnesio/mnesio/main/install.sh | sh
+mnesio-code .
+```
+
+> Needs a release built by the `binaries` job — **v0.1.0 predates it and carries
+> no binaries**, so this line starts working at v0.1.1. Until then use the build
+> from source below. The installer verifies a SHA-256, refuses to overwrite a
+> different tool of the same name, and does not touch your shell profile.
+
+<details>
+<summary>Build from source instead</summary>
+
+```bash
 git clone https://github.com/mnesio/mnesio.git && cd mnesio
 cargo install --path crates/mnesio-code --features tree-sitter
 mnesio-code .
 ```
+
+`--features tree-sitter` compiles 28 grammars, so expect minutes on a cold
+build. That cost is exactly why the prebuilt binaries exist.
+
+</details>
 
 Writes three files into the directory you pointed at:
 
@@ -65,14 +83,22 @@ Writes three files into the directory you pointed at:
 No port, no running process, nothing fetched at view time — the page inlines
 its own data, so you can attach it to a review or mail it to someone.
 
-`--features tree-sitter` is worth the longer build: without it you get six
-languages instead of thirty. Either way the tool tells you what it skipped
-rather than quietly drawing a smaller map —
+Two things the map tells you that a prettier one would not.
+
+**What it could not read.** A smaller map and a smaller codebase look identical
+unless the tool says which it is:
 
 ```
 reading 18/54 files (33%) — skipped: .h (16), .cpp (12), .css (2), .frag (2)
   Most of this repository is in a language this build cannot parse.
 ```
+
+**Which edges are guesses.** Every edge is marked *read* — the callee is defined
+in the caller's own file, so the name is right there — or *inferred*, meaning it
+was bound to a unique same-named definition elsewhere with no type information
+behind it. Inferred edges are drawn dashed. Measured with grammars, the share
+that is read ranges from 99% on this repo to **73% on `tare`**, so it is
+reported per-graph rather than claimed once.
 
 **What it does not print is a token-saving multiple.** Every number in the
 artifacts describes the repository in front of it — symbols, resolved calls,

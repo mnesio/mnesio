@@ -16,6 +16,100 @@ permissions:
   contents: read
 
 jobs:
+  # ----- Prebuilt CLI binaries → the GitHub release -----
+  #
+  # The reason this job exists: `mnesio-code` is only useful with
+  # `--features tree-sitter`, which compiles 28 C grammars. From source that is
+  # minutes of build on a first run, against a competitor's `uv tool install`
+  # that takes seconds. Nobody evaluates the tool if installing it is the
+  # hardest part, so the grammar build happens once, here, and a user downloads
+  # the result.
+  #
+  # `mnesio-mcp` ships alongside because the artifacts and the editor loop are
+  # halves of one product: the map shows which symbols helped, and only the MCP
+  # server records that.
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # attach assets to the release
+    strategy:
+      fail-fast: false # one broken platform must not withhold the other four
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          # 22.04, not latest: a binary linked against 24.04's glibc 2.39 will
+          # not start on Debian 12 or Ubuntu 22.04, and the failure is an
+          # unexplained "GLIBC_2.39 not found" at exec time. Building on the
+          # older image sets the floor at glibc 2.35 instead. Older still would
+          # need musl, which the C grammars make fiddly enough to be its own
+          # task rather than a footnote in this one.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p mnesio-code --bin mnesio-code --features tree-sitter
+          cargo build --release --target ${{ matrix.target }} \
+            -p mnesio-mcp --bin mnesio-mcp
+        shell: bash
+
+      # Prove the binary runs on the machine that built it before publishing it.
+      # A tarball nobody executed is how a release ships something that cannot
+      # start, and `--help` is enough to catch a missing dynamic library.
+      - name: Smoke-test what we are about to publish
+        run: ./target/${{ matrix.target }}/release/mnesio-code --help
+        shell: bash
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="mnesio-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          ext=""
+          [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/mnesio-code$ext" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/mnesio-mcp$ext" "dist/$name/"
+          cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a "$name.zip" "$name" >/dev/null
+            asset="$name.zip"
+          else
+            tar czf "$name.tar.gz" "$name"
+            asset="$name.tar.gz"
+          fi
+          # Checksums are not decoration: install.sh refuses to install without
+          # a matching one, so a truncated download fails loudly instead of
+          # leaving a corrupt binary on someone's PATH.
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          echo "asset=dist/$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pkg.outputs.asset }}
+            ${{ steps.pkg.outputs.asset }}.sha256
+          fail_on_unmatched_files: true
+
   # ----- Container image → GitHub Container Registry (no external secrets) -----
   docker:
     name: container → ghcr.io
