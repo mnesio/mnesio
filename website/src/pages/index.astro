@@ -226,9 +226,12 @@ const rules = [
               <div class="stat-sub">at 105,000 memories indexed</div>
             </div>
             <div class="stat">
-              <div class="stat-num">29,413</div>
-              <div class="stat-label">symbols measured across 5 real repos</div>
-              <div class="stat-sub">355 queries derived from those repos' own git history</div>
+              <div class="stat-num">526</div>
+              <div class="stat-label">queries across 10 pinned public repos</div>
+              <div class="stat-sub">
+                derived from those repos' own git history · runs in ~300s ·
+                <code>manifest run</code>
+              </div>
             </div>
             <div class="stat">
               <div class="stat-num">30</div>
@@ -544,32 +547,38 @@ const rules = [
 
           <div class="honest">
             <article class="hcard hcard-bad">
-              <div class="hcard-num">33<span class="unit">pp</span></div>
+              <div class="hcard-num">20<span class="unit">pp</span></div>
               <h3>Whole-file beats us at the ceiling</h3>
               <p>
-                Given unlimited context, reading whole files reaches 96% on one
-                repo where symbol retrieval tops out at 66%. Median gap across
-                five repos: 33 points. Symbol memory is cheaper and
-                <em>strictly worse</em> when budget is no object.
+                Given unlimited context, reading whole files reaches a median
+                78% where symbol retrieval reaches 58%. Median gap across the
+                six repos large enough to discriminate: 20 points, worst case
+                27. Symbol memory is cheaper and <em>strictly worse</em> when
+                budget is no object.
               </p>
               <p class="hcard-but">
-                The catch: whole-file costs 51k–221k tokens per query on that
-                repo. At any budget ≤16k it can't fit a single file, so it scores
-                zero. The advantage is graceful degradation, not winning.
+                The catch: whole-file can cost 50k+ tokens per query. Below a
+                16k budget it often can't fit a single file, so it scores zero.
+                The advantage is graceful degradation, not winning. An earlier
+                run on a private corpus put the gap at 33pp — that corpus can't
+                be re-run, so this page quotes the one you can.
               </p>
             </article>
 
             <article class="hcard hcard-bad">
-              <div class="hcard-num">9<span class="unit">%</span></div>
+              <div class="hcard-num">10<span class="unit">%</span></div>
               <h3>Unreachable by any ranker</h3>
               <p>
-                On 400 real tasks, 9% share no indexed term with the code they
-                touched. No scoring change reaches them. So the ceiling on
-                ranking work is 91%, not 100% — and we're at 62%.
+                Median share of tasks that share no indexed term with the code
+                they touched — 4% at best, 18% at worst across the corpus. No
+                scoring change reaches them, so the ceiling on ranking work is
+                nearer 90% than 100%, and symbol retrieval sits at 58%.
               </p>
               <p class="hcard-but">
                 Published because the alternative is quietly measuring against
-                100% and calling the same result a bigger achievement.
+                100% and calling the same result a bigger achievement. A further
+                17% of misses are <em>rankable</em> — reachable by better
+                scoring, and currently the largest addressable gap.
               </p>
             </article>
 
@@ -603,15 +612,22 @@ const rules = [
             </article>
 
             <article class="hcard hcard-bad">
-              <div class="hcard-num">0</div>
-              <h3>Learning curve on a real repo</h3>
+              <div class="hcard-num">0.12</div>
+              <h3>The loop has never actually fired</h3>
               <p>
-                The loop is built, tested end to end, and proven to refuse a
-                canary-breaking rule. It has <em>not</em> yet been run against a
-                live repository long enough to publish a curve.
+                Outcomes per symbol on a benchmark derived from git history —
+                against the 5 needed before a rule is proposed. Run on ripgrep
+                at two sizes: <strong>zero proposals both times</strong>.
+                Doubling the suite didn't move the ratio.
               </p>
               <p class="hcard-but">
-                When it is, the number goes here whether it goes up or stays flat.
+                It's structural. Every query is a different commit, commits
+                touch different code, so a symbol is seen once and never
+                revisited — and evidence needs revisiting. The gate is proven to
+                refuse a canary-breaking rule in tests; on a derived benchmark
+                it has nothing to adjudicate. Real usage has the repetition;
+                that data is being collected now, and the curve goes here
+                whichever way it points.
               </p>
             </article>
 
@@ -633,12 +649,24 @@ const rules = [
           <div class="callout callout-quiet">
             <div class="callout-mark">§</div>
             <div>
-              <strong>How these were produced.</strong> Queries come from each
-              repository's own git history — a real commit subject, written by a
-              human before mnesio existed, with the symbols that commit touched
-              as the gold set (traced by <span class="mono">git log -L</span>,
-              every symbol, never a sample). Both arms run against a single
-              shared index so build randomness can't masquerade as an effect.
+              <strong>How these were produced, and how to re-run them.</strong>
+              The corpus is a committed manifest: 10 public repositories pinned
+              to exact commits, each capped so the whole suite finishes inside a
+              declared budget. Queries come from each repository's own git
+              history — a real commit subject, written by a human before mnesio
+              existed, with the symbols that commit touched as the gold set
+              (traced by <span class="mono">git log -L</span>, every symbol,
+              never a sample).
+              <br /><br />
+              <strong>The harness measures its own noise.</strong> Running the
+              identical configuration three times moves any single repository's
+              recall by up to <strong>2pp</strong>, so nothing under 2pp is
+              reported as a finding — and one thing already isn't. A change to
+              call-graph resolution looked like a 2pp effect until a control run
+              showed identical variation with nothing changed. Seeding the index
+              wouldn't fix that: two configurations build two different graphs
+              whatever the seed, so a single run per arm is still one sample
+              from each.
               <a href={`${base}/reference/benchmarks/`}>Full method and raw runs →</a>
             </div>
           </div>
