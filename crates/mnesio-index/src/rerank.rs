@@ -184,12 +184,15 @@ impl crate::Reranker for LexicalReranker {
             h.breakdown.push(("rerank".to_string(), feat));
         }
 
-        // Stable sort by the blended score, descending — ties keep their
-        // fused order.
+        // Descending blended score, then memory id. "Ties keep their fused
+        // order" was true and not sufficient: it inherits whatever order the
+        // fused list had, so any upstream non-determinism survives this stage
+        // intact. Breaking on id makes the reranked order total on its own
+        // terms rather than conditional on the caller's.
         hits.sort_by(|a, b| {
             b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.score)
+                .then(a.memory.0.cmp(&b.memory.0))
         });
         Ok(hits)
     }

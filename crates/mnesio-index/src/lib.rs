@@ -308,10 +308,25 @@ impl Retriever for HybridRetriever {
                 }
             })
             .collect();
+        // Descending score, then ascending memory id. The tie-break is not
+        // cosmetic: `bucket` is a `HashMap`, Rust seeds `HashMap` per process,
+        // and this vec is built by draining it — so equal scores arrived in a
+        // different order in every process. `Ordering::Equal` then left them
+        // that way, and a stable sort faithfully preserved the accident.
+        //
+        // Measured before this: 10 of 40 real queries returned a different
+        // packed context across processes even after `VectorView` was made
+        // exact. Every difference was at the budget boundary — a tied
+        // candidate displacing another — which is exactly where ties decide
+        // what an agent gets to see.
+        //
+        // `total_cmp` rather than `partial_cmp(..).unwrap_or(Equal)`: a `NaN`
+        // score would otherwise compare Equal to everything and reintroduce
+        // the same dependence on arrival order.
         hits.sort_by(|a, b| {
             b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.score)
+                .then(a.memory.0.cmp(&b.memory.0))
         });
 
         // Final reorder stage (identity by default). Rerank the
