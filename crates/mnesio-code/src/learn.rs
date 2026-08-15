@@ -69,6 +69,28 @@ pub struct LearnConfig {
     /// A batch that suppresses fifty symbols at once is untestable: if the
     /// gate rejects it, nothing says which suppression was wrong.
     pub max_rules_per_batch: usize,
+    /// Success rate at or above which a **term→symbol** pairing looks worth
+    /// promoting. See [`SymbolLedger::propose_promotions`].
+    pub min_promote_success_rate: f32,
+    /// Decisive outcomes a term→symbol pairing needs before promotion.
+    ///
+    /// Separate from [`Self::min_decisive`], and lower, because the evidence is
+    /// sliced far more finely: a symbol accumulates outcomes across every task
+    /// it was packed into, but a *pairing* only accumulates on tasks mentioning
+    /// that term. Reusing the suppression floor here would mean no pairing ever
+    /// cleared it, which is a threshold chosen to guarantee silence.
+    pub min_promote_decisive: usize,
+    /// How far a pairing must beat the batch's own success rate.
+    ///
+    /// Without this the promoter selects the *commonest* terms rather than the
+    /// most informative ones: at 88% baseline every well-evidenced pairing
+    /// scores ~100%, so the tie-break degenerates to term frequency. Requiring
+    /// a margin over the base rate is what makes "this term predicts this
+    /// symbol" mean something more than "this term is frequent".
+    pub min_promote_lift: f32,
+    /// Probability, under the batch's own base rate, of a run at least this
+    /// good happening by chance. Above it, the pairing is not evidence.
+    pub max_promote_p: f32,
 }
 
 impl Default for LearnConfig {
@@ -79,6 +101,17 @@ impl Default for LearnConfig {
             min_decisive: 5,
             max_success_rate: 0.2,
             max_rules_per_batch: 3,
+            // A pairing that helped four times out of four is worth trying;
+            // demanding perfection would exclude the useful near-misses, and
+            // the gate is what makes a wrong guess cheap.
+            min_promote_success_rate: 0.8,
+            min_promote_decisive: 3,
+            // Ten points clear of chance. Small enough that a real signal
+            // survives, large enough that the base rate alone cannot qualify.
+            min_promote_lift: 0.10,
+            // The usual 5%. Not tuned: picking a threshold that lets the
+            // current data through is how a null result becomes a feature.
+            max_promote_p: 0.05,
         }
     }
 }
@@ -110,6 +143,20 @@ pub struct SymbolLedger {
     /// A symbol that misleads one kind of task may be exactly right for
     /// another; a global suppression would trade a local win for a broad loss.
     per_symbol_classes: HashMap<MemoryRef, Vec<String>>,
+    /// Evidence for one symbol on tasks containing one **term**.
+    ///
+    /// The unit promotion needs, and the reason it is keyed by term rather than
+    /// by [`query_class`]. Measured on claw-code's 395 commit subjects: a
+    /// 4-word class is effectively a commit fingerprint — 377 distinct classes,
+    /// 3% recurring, and only **4%** of held-out tasks share a class with any
+    /// training task. A rule scoped that finely can never fire on unseen work,
+    /// so it would have been unmeasurable rather than merely weak.
+    ///
+    /// Single terms recur: the same corpus has 188 distinct first-terms with
+    /// **51%** held-out coverage, and matching *any* shared term rather than an
+    /// exact bucket is higher still. So a promotion is scoped to a term, and
+    /// applies to any later task mentioning it.
+    per_term_symbol: HashMap<(String, MemoryRef), DecisionEvidence>,
 }
 
 /// Which constraint stopped a batch from proposing anything.
@@ -211,6 +258,7 @@ impl SymbolLedger {
 
     pub fn record(&mut self, outcome: &CodeOutcome) {
         let class = query_class(&outcome.task);
+        let terms = query_terms(&outcome.task);
         for s in &outcome.symbols {
             self.per_symbol
                 .entry(s.memory)
@@ -220,7 +268,122 @@ impl SymbolLedger {
             if !classes.contains(&class) {
                 classes.push(class.clone());
             }
+            for t in &terms {
+                self.per_term_symbol
+                    .entry((t.clone(), s.memory))
+                    .or_default()
+                    .record(outcome.result);
+            }
         }
+    }
+
+    /// Propose **promotions**: term → symbol pairings that kept coming with
+    /// success, so the symbol is pulled into context for later tasks using that
+    /// term even when it would have ranked below the cutoff.
+    ///
+    /// ## Why this exists at all
+    ///
+    /// Suppression was the first rule type because a mistake is cheap to
+    /// detect. Measured, it never fires: on two real modules 11 and 20 symbols
+    /// cleared the evidence floor and **none** had a success rate at or below
+    /// `max_success_rate`. With baseline recall near 88%, almost nothing sits
+    /// in contexts that fail four times in five. You cannot learn by removing
+    /// things when nothing is consistently poisonous.
+    ///
+    /// So the rule type that can move a healthy retriever is the opposite one.
+    /// It is also the riskier one — a promotion displaces whatever it outranks,
+    /// and unlike a suppression it can be wrong without any canary noticing the
+    /// symbol it pushed out. That is why it goes through the same gate and why
+    /// the batch cap applies.
+    ///
+    /// ## What it deliberately does not claim
+    ///
+    /// Co-occurrence with success is not contribution. The symbol may have been
+    /// irrelevant and the task easy. Phase 10's counterfactual masking is what
+    /// would upgrade this to a causal claim; until then a promotion is a bet
+    /// that the gate is allowed to refuse.
+    pub fn propose_promotions(&self, cfg: LearnConfig) -> Vec<RuleProposal> {
+        // The base rate this batch succeeded at, over all symbols. A pairing is
+        // only news if it beats this.
+        //
+        // Ranking by raw success rate does not work and the failure is
+        // instructive rather than obvious. Measured on two real modules, the
+        // rule it selected was `"tests"` and `"api"` — the *least*
+        // discriminating terms in the corpus. With baseline recall near 88%,
+        // "succeeded 4 times out of 4" is what chance looks like, so every
+        // sufficiently-evidenced pairing ties at ~100% and the tie-break falls
+        // to evidence volume, which is just term frequency. The rules fired,
+        // passed the gate, and moved held-out recall +0.0pp on both modules.
+        let (s, f): (usize, usize) = self
+            .per_symbol
+            .values()
+            .fold((0, 0), |(s, f), e| (s + e.successes, f + e.failures));
+        let base = if s + f == 0 {
+            0.0
+        } else {
+            s as f32 / (s + f) as f32
+        };
+        let floor = cfg
+            .min_promote_success_rate
+            .max(base + cfg.min_promote_lift);
+
+        let mut candidates: Vec<(&String, MemoryRef, &DecisionEvidence, f32)> = self
+            .per_term_symbol
+            .iter()
+            .filter_map(|((term, m), e)| {
+                if e.decisive() < cfg.min_promote_decisive {
+                    return None;
+                }
+                let rate = e.success_rate()?;
+                if rate < floor {
+                    return None;
+                }
+                // Margin over the base rate is not enough, and this is the
+                // second thing that had to be measured rather than assumed. At
+                // base 0.88 a pairing of "4 successes out of 4" clears any
+                // sensible lift threshold — but P(4 of 4 | p=0.88) is **0.60**.
+                // It is the single most likely thing to observe. Selecting on
+                // it produced three rules per module, on the commonest terms,
+                // all committed by the gate, and +0.0pp on held-out.
+                //
+                // So the real test is whether the run would be surprising by
+                // chance. At these base rates and sample sizes almost nothing
+                // is, and proposing nothing is the correct answer rather than a
+                // bug — see the module docs on why that points at Phase 10.
+                (upper_tail(e.successes, e.decisive(), base as f64) <= cfg.max_promote_p as f64)
+                    .then_some((term, *m, e, rate))
+            })
+            .collect();
+
+        // Best first, then by evidence volume, then by term and id — a stable
+        // order is what makes a rejected batch reproducible.
+        candidates.sort_by(|a, b| {
+            b.3.partial_cmp(&a.3)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.2.decisive().cmp(&a.2.decisive()))
+                .then(a.0.cmp(b.0))
+                .then(a.1 .0.cmp(&b.1 .0))
+        });
+        candidates.truncate(cfg.max_rules_per_batch);
+
+        candidates
+            .into_iter()
+            .map(|(term, m, e, rate)| RuleProposal {
+                kind: ArtifactKind::RetrievalRule {
+                    query_pattern: term.clone(),
+                    rewrite: format!("+boost:{}", m.0),
+                },
+                rationale: format!(
+                    "{} of {} tasks mentioning {:?} succeeded with this symbol \
+                     in context ({:.0}% success)",
+                    e.successes,
+                    e.decisive(),
+                    term,
+                    rate * 100.0
+                ),
+                evidence: e.clone(),
+            })
+            .collect()
     }
 
     pub fn evidence(&self, m: MemoryRef) -> Option<&DecisionEvidence> {
@@ -290,6 +453,24 @@ impl SymbolLedger {
     }
 }
 
+/// P(X >= k) for X ~ Binomial(n, p) — the chance of a run at least this good.
+///
+/// Exact rather than a normal approximation because n is single digits here,
+/// which is exactly where the approximation is worst.
+fn upper_tail(k: usize, n: usize, p: f64) -> f64 {
+    if k == 0 {
+        return 1.0;
+    }
+    let mut term = (1.0 - p).powi(n as i32); // P(X = 0)
+    let mut cdf_below = 0.0;
+    for i in 0..k {
+        cdf_below += term;
+        // P(X=i+1) from P(X=i), avoiding factorials that overflow.
+        term *= p / (1.0 - p) * ((n - i) as f64) / ((i + 1) as f64);
+    }
+    (1.0 - cdf_below).clamp(0.0, 1.0)
+}
+
 /// Reduce a task to the class the compiler learns over.
 ///
 /// Content words only, lowercased and sorted, so "fix the retry backoff" and
@@ -297,6 +478,19 @@ impl SymbolLedger {
 /// class never accumulates enough evidence to clear the floor, so a rule for
 /// it would never be proposed at all.
 fn query_class(task: &str) -> String {
+    let mut words = query_terms(task);
+    words.truncate(4);
+    words.join(" ")
+}
+
+/// The content words a rule may be scoped to, sorted and deduplicated.
+///
+/// Split out from [`query_class`] because promotion is keyed by a *single*
+/// term. Measured on 395 real commit subjects: joining four of these into one
+/// class produces 377 distinct classes with 4% held-out coverage — a
+/// fingerprint. Individual terms recur, which is what makes a term-scoped rule
+/// able to fire on work it has not seen.
+pub(crate) fn query_terms(task: &str) -> Vec<String> {
     const NOISE: &[&str] = &[
         "the", "and", "for", "with", "add", "fix", "use", "new", "not", "from", "into", "when",
         "that", "this", "make", "update", "remove", "support", "should", "would",
@@ -309,8 +503,7 @@ fn query_class(task: &str) -> String {
         .collect();
     words.sort();
     words.dedup();
-    words.truncate(4);
-    words.join(" ")
+    words
 }
 
 #[cfg(test)]
@@ -331,6 +524,112 @@ mod tests {
             }],
             tokens_used: 100,
         }
+    }
+
+    #[test]
+    fn a_term_that_beats_the_base_rate_is_promoted() {
+        // Lift, not raw success. The batch has to contain failures or there is
+        // no base rate to beat — which is itself the correct behaviour: when
+        // everything already succeeds there is nothing to learn, and a promoter
+        // that fired anyway would be selecting on term frequency alone.
+        let helpful = MemoryRef(new_id());
+        let other = MemoryRef(new_id());
+        let mut l = SymbolLedger::default();
+        for i in 0..4 {
+            l.record(&outcome(
+                &format!("session store cleanup pass {i}"),
+                helpful,
+                EditResult::Passed,
+            ));
+        }
+        // Drag the base rate down with unrelated failures.
+        for i in 0..6 {
+            l.record(&outcome(
+                &format!("sandbox mount path {i}"),
+                other,
+                EditResult::BuildFailed,
+            ));
+        }
+
+        let props = l.propose_promotions(LearnConfig::default());
+        let boost = props
+            .iter()
+            .find(|p| {
+                matches!(&p.kind, ArtifactKind::RetrievalRule { rewrite, .. }
+                               if rewrite.contains("+boost:"))
+            })
+            .expect("a term that beats the base rate must promote");
+        let ArtifactKind::RetrievalRule { query_pattern, .. } = &boost.kind else {
+            unreachable!()
+        };
+        // Scoped to a single term, not the whole task: a 4-word class is a
+        // commit fingerprint (377 distinct over 395 subjects, 4% held-out
+        // coverage) and would never fire on unseen work.
+        assert!(!query_pattern.contains(' '), "got: {query_pattern:?}");
+    }
+
+    #[test]
+    fn the_binomial_tail_matches_hand_computed_values() {
+        // The number that killed the first two versions of this rule type:
+        // four successes out of four, against a base rate of 0.88, is the most
+        // likely single outcome — not evidence of anything.
+        let p = upper_tail(4, 4, 0.88);
+        assert!((p - 0.88_f64.powi(4)).abs() < 1e-9, "got {p}");
+        assert!(p > 0.5, "4/4 at base 0.88 must not look surprising: {p}");
+
+        // A fair coin run that genuinely is surprising.
+        assert!(upper_tail(10, 10, 0.5) < 0.002);
+        // Nothing observed is never surprising.
+        assert_eq!(upper_tail(0, 5, 0.3), 1.0);
+        // A full run at a low base rate is.
+        assert!(upper_tail(5, 5, 0.2) < 0.001);
+    }
+
+    #[test]
+    fn a_batch_that_never_fails_promotes_nothing() {
+        // The degenerate case that produced the first, useless version of this
+        // rule type: with an all-success batch every pairing scores 100%, the
+        // ranking falls back to term frequency, and the promoter selected
+        // "tests" and "api" — the least discriminating words available. Those
+        // rules committed and moved held-out recall +0.0pp on two modules.
+        let m = MemoryRef(new_id());
+        let mut l = SymbolLedger::default();
+        for i in 0..8 {
+            l.record(&outcome(
+                &format!("tests for thing {i}"),
+                m,
+                EditResult::Passed,
+            ));
+        }
+        assert!(
+            l.propose_promotions(LearnConfig::default()).is_empty(),
+            "nothing to learn from a batch with no failures"
+        );
+    }
+
+    #[test]
+    fn a_term_that_mostly_failed_is_not_promoted() {
+        // Promotion must not become a second door into the policy for a
+        // pairing that suppression would have rejected.
+        let bad = MemoryRef(new_id());
+        let mut l = SymbolLedger::default();
+        for i in 0..4 {
+            l.record(&outcome(
+                &format!("sandbox mount handling {i}"),
+                bad,
+                EditResult::BuildFailed,
+            ));
+        }
+        assert!(l.propose_promotions(LearnConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn a_thinly_evidenced_pairing_is_not_promoted() {
+        let m = MemoryRef(new_id());
+        let mut l = SymbolLedger::default();
+        // One success is a coincidence, not a pattern.
+        l.record(&outcome("retry backoff jitter", m, EditResult::Passed));
+        assert!(l.propose_promotions(LearnConfig::default()).is_empty());
     }
 
     #[test]

@@ -19,8 +19,6 @@
 //! conflate two effects: removing a bad result, and showing one more result.
 //! Only the first is what a suppression rule claims to do.
 
-use std::collections::HashSet;
-
 use anyhow::Result;
 
 use mnesio_code::CodeMemory;
@@ -28,7 +26,7 @@ use mnesio_core::types::MemoryRef;
 use mnesio_core::{Query, Retriever, Scope};
 
 use crate::codeeval::CodeQuery;
-use crate::learncurve::{CurveIndex, Scored};
+use crate::learncurve::{CurveIndex, Policy, Scored};
 
 /// An indexed repository the curve can retrieve against.
 pub struct RepoCurveIndex {
@@ -77,7 +75,7 @@ impl RepoCurveIndex {
 }
 
 impl CurveIndex for RepoCurveIndex {
-    async fn run(&self, q: &CodeQuery, suppressed: &HashSet<MemoryRef>) -> Result<Scored> {
+    async fn run(&self, q: &CodeQuery, policy: &Policy) -> Result<Scored> {
         let Some(retriever) = self.memory.retriever() else {
             return Ok(Scored {
                 hit: false,
@@ -96,11 +94,30 @@ impl CurveIndex for RepoCurveIndex {
         // Post-filter, matching what a committed `RetrievalRule` does. The
         // vacated slots are NOT refilled — see the module docs on why that
         // would conflate removing a bad result with showing an extra one.
-        let kept: Vec<MemoryRef> = hits
+        let mut kept: Vec<MemoryRef> = hits
             .iter()
             .map(|h| h.memory)
-            .filter(|m| !suppressed.contains(m))
+            .filter(|m| !policy.suppressed.contains(m))
             .collect();
+
+        // Promotions: a symbol whose term appears in this task joins the
+        // context even if retrieval ranked it below the cutoff. That is the
+        // whole point — a promotion that only reordered results already
+        // returned could never surface something retrieval missed, which is
+        // where the remaining recall is.
+        //
+        // The list is *extended*, not substituted into a fixed budget, for the
+        // same reason suppression does not refill: mixing "showed one more
+        // thing" with "dropped one thing" in a single measurement makes the
+        // resulting delta unattributable.
+        if !policy.boosts.is_empty() {
+            let terms = task_terms(&q.question);
+            for (term, m) in &policy.boosts {
+                if terms.contains(term) && !kept.contains(m) && self.memory.symbol(*m).is_some() {
+                    kept.push(*m);
+                }
+            }
+        }
 
         let hit = kept.iter().any(|m| {
             self.memory.symbol(*m).is_some_and(|(path, name)| {
@@ -111,4 +128,23 @@ impl CurveIndex for RepoCurveIndex {
 
         Ok(Scored { hit, symbols: kept })
     }
+}
+
+/// Content words of a task, matching how a promotion rule was keyed.
+///
+/// Duplicated deliberately rather than exported from `mnesio-code`: the rule's
+/// pattern is a plain string in a `PolicyArtifact`, so whatever applies it has
+/// to agree on tokenisation independently. Sharing a private helper would hide
+/// that coupling rather than remove it — pinned by
+/// `a_promotion_fires_on_a_task_sharing_its_term`.
+fn task_terms(task: &str) -> std::collections::HashSet<String> {
+    const NOISE: &[&str] = &[
+        "the", "and", "for", "with", "add", "fix", "use", "new", "not", "from", "into", "when",
+        "that", "this", "make", "update", "remove", "support", "should", "would",
+    ];
+    task.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .map(str::to_lowercase)
+        .filter(|w| !NOISE.contains(&w.as_str()))
+        .collect()
 }

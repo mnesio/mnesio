@@ -140,42 +140,74 @@ pub struct Scored {
     pub symbols: Vec<MemoryRef>,
 }
 
+/// The retrieval policy in force for one measurement.
+///
+/// Was a bare `HashSet` of suppressed memories. Promotion needs the opposite
+/// direction — a symbol pulled *into* context — so the two travel together and
+/// a measurement always states the whole policy it ran under rather than half
+/// of it.
+#[derive(Debug, Clone, Default)]
+pub struct Policy {
+    pub suppressed: HashSet<MemoryRef>,
+    /// `(term, symbol)`: when a task mentions `term`, ensure `symbol` is in
+    /// context even if retrieval ranked it below the cutoff.
+    pub boosts: Vec<(String, MemoryRef)>,
+}
+
+impl Policy {
+    pub fn is_empty(&self) -> bool {
+        self.suppressed.is_empty() && self.boosts.is_empty()
+    }
+}
+
 /// What the harness needs from an index. A trait so the curve logic is
 /// testable without embedding a repository (Hard Rule #7).
 #[allow(async_fn_in_trait)]
 pub trait CurveIndex {
     /// Retrieve for `task`, excluding any suppressed memory, and report
     /// whether a gold symbol survived into the result.
-    async fn run(&self, q: &CodeQuery, suppressed: &HashSet<MemoryRef>) -> Result<Scored>;
+    async fn run(&self, q: &CodeQuery, policy: &Policy) -> Result<Scored>;
 }
 
 /// Recall over a slice of queries under a suppression set.
-async fn measure(
-    index: &impl CurveIndex,
-    queries: &[&CodeQuery],
-    suppressed: &HashSet<MemoryRef>,
-) -> Result<f32> {
+async fn measure(index: &impl CurveIndex, queries: &[&CodeQuery], policy: &Policy) -> Result<f32> {
     if queries.is_empty() {
         return Ok(0.0);
     }
     let mut hits = 0usize;
     for q in queries {
-        if index.run(q, suppressed).await?.hit {
+        if index.run(q, policy).await?.hit {
             hits += 1;
         }
     }
     Ok(hits as f32 / queries.len() as f32)
 }
 
-/// Memory ids a proposal would suppress.
-fn excluded(p: &RuleProposal) -> Vec<String> {
-    match &p.kind {
-        ArtifactKind::RetrievalRule { rewrite, .. } => rewrite
-            .split_whitespace()
-            .filter_map(|t| t.strip_prefix("-exclude:"))
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
+/// Turn a proposal into the policy change it asks for.
+///
+/// Both directions live here because a `RetrievalRule` carries either, and a
+/// reader tracing "what did this rule actually do" should find one answer, not
+/// two half-answers in different functions.
+fn apply_to(p: &RuleProposal, policy: &mut Policy) {
+    let ArtifactKind::RetrievalRule {
+        query_pattern,
+        rewrite,
+    } = &p.kind
+    else {
+        return;
+    };
+    for t in rewrite.split_whitespace() {
+        if let Some(id) = t.strip_prefix("-exclude:") {
+            if let Ok(parsed) = id.parse() {
+                policy.suppressed.insert(MemoryRef(parsed));
+            }
+        } else if let Some(id) = t.strip_prefix("+boost:") {
+            if let Ok(parsed) = id.parse() {
+                policy
+                    .boosts
+                    .push((query_pattern.clone(), MemoryRef(parsed)));
+            }
+        }
     }
 }
 
@@ -194,7 +226,7 @@ pub async fn run_curve(
         ));
     }
 
-    let none = HashSet::new();
+    let none = Policy::default();
     let mut report = CurveReport {
         train: s.train.len(),
         canary: s.canary.len(),
@@ -237,21 +269,22 @@ pub async fn run_curve(
     report.symbols_observed = ledger.symbols_seen();
 
     // --- propose, then gate each one ---
-    let proposals = ledger.propose(cfg);
+    // Suppressions first, then promotions. Order matters only for the
+    // cumulative gate, and putting the safer kind first means a promotion is
+    // judged against a policy that already includes any accepted removal.
+    let mut proposals = ledger.propose(cfg);
+    proposals.extend(ledger.propose_promotions(cfg));
     report.proposals = proposals.len();
     report.evidence = ledger.evidence_summary(cfg);
 
-    let mut committed: HashSet<MemoryRef> = HashSet::new();
+    let mut committed = Policy::default();
     for p in &proposals {
         // Candidate = everything already committed, plus this rule. Rules are
         // gated cumulatively because they interact: two suppressions that are
-        // each harmless can together strip a query's only answer.
+        // each harmless can together strip a query's only answer, and two
+        // promotions can together crowd out the symbol a third query needed.
         let mut candidate = committed.clone();
-        for id in excluded(p) {
-            if let Ok(parsed) = id.parse() {
-                candidate.insert(MemoryRef(parsed));
-            }
-        }
+        apply_to(p, &mut candidate);
 
         let after = measure(index, &s.canary, &candidate).await?;
         // Any regression refuses it. Hard Rule #1 — the canary set is not a
@@ -391,8 +424,8 @@ mod tests {
     }
 
     impl CurveIndex for Poisoned {
-        async fn run(&self, _q: &CodeQuery, sup: &HashSet<MemoryRef>) -> Result<Scored> {
-            let noisy = !sup.contains(&self.noise);
+        async fn run(&self, _q: &CodeQuery, policy: &Policy) -> Result<Scored> {
+            let noisy = !policy.suppressed.contains(&self.noise);
             // With the noise present it occupies the slot the good symbol
             // needed; suppressing it lets the answer through.
             let hit = if self.crowded { !noisy } else { true };
@@ -442,10 +475,10 @@ mod tests {
             m: MemoryRef,
         }
         impl CurveIndex for NeverHits {
-            async fn run(&self, _q: &CodeQuery, sup: &HashSet<MemoryRef>) -> Result<Scored> {
+            async fn run(&self, _q: &CodeQuery, policy: &Policy) -> Result<Scored> {
                 // Baseline hits; suppressing the only symbol destroys it.
                 Ok(Scored {
-                    hit: sup.is_empty(),
+                    hit: policy.is_empty(),
                     symbols: vec![self.m],
                 })
             }
