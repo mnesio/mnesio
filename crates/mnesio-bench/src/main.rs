@@ -1687,6 +1687,13 @@ struct LearnCurveOpts {
     /// Identical runs. A single run is one sample; the delta has to be
     /// compared against how much the answer moves on its own.
     repeat: usize,
+    /// Run a counterfactual contribution pass after the curve.
+    ///
+    /// Off by default: leave-one-out issues one full suite pass per candidate
+    /// symbol, so a 300-symbol module is thousands of retrievals. It is the
+    /// only measurement here that is *causal* rather than correlational, and
+    /// it costs accordingly.
+    causal: bool,
 }
 
 fn parse_learncurve(
@@ -1698,6 +1705,7 @@ fn parse_learncurve(
         k: 20,
         queries: 200,
         repeat: 1,
+        causal: false,
     };
     while let Some(a) = iter.next() {
         match a.as_str() {
@@ -1706,6 +1714,7 @@ fn parse_learncurve(
             "--k" => o.k = next_value(&mut iter, "--k")?.parse()?,
             "--queries" => o.queries = next_value(&mut iter, "--queries")?.parse()?,
             "--repeat" => o.repeat = next_value(&mut iter, "--repeat")?.parse()?,
+            "--causal" => o.causal = true,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -1771,6 +1780,42 @@ async fn cmd_learncurve(opts: LearnCurveOpts) -> Result<()> {
         deltas.push(report.delta() * 100.0);
         if first.is_none() {
             first = Some(format_curve(&report));
+        }
+
+        // The intervention. Every observational route to per-symbol credit has
+        // been measured and failed for a different reason; masking is the only
+        // one that varies a symbol while holding the rest of the context fixed.
+        if opts.causal && i == 0 {
+            use mnesio_bench::codecausal::{
+                default_code_causal_config, format_contribution, run_code_causal,
+            };
+            use mnesio_bench::learncurve::{split, Policy};
+
+            let s = split(&suite);
+            // Candidates are the symbols retrieval actually packed on the
+            // training split — masking anything else would score memories the
+            // policy never had the chance to use.
+            let mut seen: Vec<mnesio_core::types::MemoryRef> = Vec::new();
+            let none = Policy::default();
+            for q in &s.train {
+                for m in mnesio_bench::learncurve::CurveIndex::run(&index, q, &none)
+                    .await?
+                    .symbols
+                {
+                    if !seen.contains(&m) {
+                        seen.push(m);
+                    }
+                }
+            }
+            let cfg = default_code_causal_config();
+            eprintln!(
+                "# causal pass: {} candidates × {} tasks ≈ {} retrievals…",
+                seen.len().min(cfg.max_candidates),
+                s.train.len(),
+                (seen.len().min(cfg.max_candidates) + 1) * s.train.len()
+            );
+            let c = run_code_causal(&index, s.train.clone(), &seen, cfg).await?;
+            println!("\n{}", format_contribution(&c));
         }
     }
 

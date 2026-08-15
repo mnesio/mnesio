@@ -33,6 +33,7 @@ use mnesio_procedural::{
 // pulling `mnesio-procedural` directly.
 pub use mnesio_procedural::PolicyExecutor;
 
+pub mod codecausal;
 pub mod codeeval;
 pub mod compete;
 pub mod curveindex;

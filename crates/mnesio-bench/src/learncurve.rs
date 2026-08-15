@@ -162,11 +162,20 @@ impl Policy {
 
 /// What the harness needs from an index. A trait so the curve logic is
 /// testable without embedding a repository (Hard Rule #7).
-#[allow(async_fn_in_trait)]
 pub trait CurveIndex {
-    /// Retrieve for `task`, excluding any suppressed memory, and report
-    /// whether a gold symbol survived into the result.
-    async fn run(&self, q: &CodeQuery, policy: &Policy) -> Result<Scored>;
+    /// Retrieve for `task` under `policy`, and report whether a gold symbol
+    /// survived into the result.
+    ///
+    /// Spelled as a returned future with an explicit `Send` bound rather than
+    /// `async fn`, because [`crate::codecausal`] hands this to
+    /// `CounterfactualEvaluator`, whose contract is `Send + Sync`. An
+    /// `async fn` in a trait promises nothing about `Send`, so the bound has
+    /// to be stated here or the causal adapter cannot exist.
+    fn run(
+        &self,
+        q: &CodeQuery,
+        policy: &Policy,
+    ) -> impl std::future::Future<Output = Result<Scored>> + Send;
 }
 
 /// Recall over a slice of queries under a suppression set.
