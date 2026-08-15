@@ -112,6 +112,14 @@ pub struct CurveReport {
     pub baseline: f32,
     /// Held-out recall after the surviving rules.
     pub learned: f32,
+    /// Why `proposals` is what it is.
+    ///
+    /// Carried because a zero is otherwise unactionable: "no symbol had enough
+    /// evidence" and "symbols had evidence and none looked harmful" both print
+    /// as `0 proposals` and want opposite responses. Without this the obvious
+    /// next move is to lower `min_decisive` until something qualifies, which
+    /// would be tuning the gate to produce output rather than fixing the input.
+    pub evidence: mnesio_code::learn::EvidenceSummary,
 }
 
 impl CurveReport {
@@ -231,6 +239,7 @@ pub async fn run_curve(
     // --- propose, then gate each one ---
     let proposals = ledger.propose(cfg);
     report.proposals = proposals.len();
+    report.evidence = ledger.evidence_summary(cfg);
 
     let mut committed: HashSet<MemoryRef> = HashSet::new();
     for p in &proposals {
@@ -291,7 +300,42 @@ pub fn format_curve(r: &CurveReport) -> String {
         out.push_str(&format!("- {} — {}\n", d.verdict(), d.rationale));
     }
 
-    if r.delta().abs() < 0.005 {
+    // A zero must say which constraint bound it, or the obvious response is to
+    // lower the evidence floor until something qualifies — tuning the gate to
+    // manufacture output rather than fixing the input.
+    let e = &r.evidence;
+    if r.proposals == 0 {
+        out.push_str(&format!(
+            "\n### Why nothing was proposed\n\n\
+             {} symbols observed · {} decisive outcomes · \
+             {:.2} per symbol · best-evidenced symbol saw **{}**\n\n\
+             {} symbols cleared the evidence floor of {}; {} of those also \
+             looked harmful.\n\n",
+            e.symbols_seen,
+            e.decisive_total,
+            e.outcomes_per_symbol(),
+            e.max_decisive_on_one_symbol,
+            e.cleared_evidence_floor,
+            e.min_decisive,
+            e.also_looked_harmful,
+        ));
+        out.push_str(if e.cleared_evidence_floor == 0 {
+            "**Starved, not well-behaved.** No symbol was seen often enough to \
+             judge, so nothing could have been proposed however bad retrieval \
+             was. This is a property of the *suite*, not of the learner: every \
+             task is a different commit touching different code, so evidence \
+             never concentrates. The fix is a task distribution that revisits \
+             the same symbols — which is what real work does and what a \
+             git-derived suite structurally cannot.\n"
+        } else {
+            "**Evidence sufficed and nothing looked harmful.** Symbols cleared \
+             the floor and none had a low enough success rate to suppress. More \
+             tasks will not change that; this is the learner correctly declining \
+             to act.\n"
+        });
+    }
+
+    if r.delta().abs() < 0.005 && r.proposals > 0 {
         out.push_str(
             "\n**Flat.** The surviving rules did not move held-out performance. \
              That is a real outcome and it is reported as one: the mechanism \
@@ -448,14 +492,60 @@ mod tests {
 
     #[test]
     fn a_flat_result_is_labelled_as_flat() {
-        // The report must not let a null result read as a win.
+        // The report must not let a null result read as a win. "Flat" means
+        // rules were committed and moved nothing — so the report must have
+        // proposals, or it is describing a different failure entirely.
         let r = CurveReport {
             baseline: 0.6,
             learned: 0.6,
+            proposals: 2,
             ..Default::default()
         };
         let text = format_curve(&r);
         assert!(text.contains("Flat"), "got: {text}");
+    }
+
+    #[test]
+    fn zero_proposals_is_not_reported_as_flat() {
+        // These are different failures wanting opposite fixes, and collapsing
+        // them into "Flat" is what let the loop look like it had run when it
+        // had never proposed anything at all.
+        let starved = CurveReport {
+            baseline: 0.6,
+            learned: 0.6,
+            proposals: 0,
+            evidence: mnesio_code::learn::EvidenceSummary {
+                symbols_seen: 300,
+                decisive_total: 40,
+                max_decisive_on_one_symbol: 2,
+                cleared_evidence_floor: 0,
+                also_looked_harmful: 0,
+                min_decisive: 5,
+            },
+            ..Default::default()
+        };
+        let text = format_curve(&starved);
+        assert!(!text.contains("**Flat.**"), "got: {text}");
+        assert!(text.contains("Starved"), "got: {text}");
+
+        // The other zero: evidence was plentiful and nothing looked harmful.
+        // Measured on two real modules — 11 and 20 symbols cleared the floor,
+        // none qualified — so this branch is the one that actually fires.
+        let no_target = CurveReport {
+            proposals: 0,
+            evidence: mnesio_code::learn::EvidenceSummary {
+                symbols_seen: 315,
+                decisive_total: 480,
+                max_decisive_on_one_symbol: 11,
+                cleared_evidence_floor: 11,
+                also_looked_harmful: 0,
+                min_decisive: 5,
+            },
+            ..Default::default()
+        };
+        let text = format_curve(&no_target);
+        assert!(text.contains("nothing looked harmful"), "got: {text}");
+        assert!(!text.contains("Starved"), "got: {text}");
     }
 
     #[test]

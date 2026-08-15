@@ -112,6 +112,48 @@ pub struct SymbolLedger {
     per_symbol_classes: HashMap<MemoryRef, Vec<String>>,
 }
 
+/// Which constraint stopped a batch from proposing anything.
+///
+/// See [`SymbolLedger::evidence_summary`]. The two counts at the end are the
+/// ones that matter: `cleared_evidence_floor` is how much the loop *knows*,
+/// and `also_looked_harmful` is how much of that is worth acting on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvidenceSummary {
+    /// Distinct symbols that appeared in any recorded context.
+    pub symbols_seen: usize,
+    /// Decisive outcomes summed over every symbol — the raw evidence volume.
+    pub decisive_total: usize,
+    /// The best-evidenced single symbol. If this is below
+    /// [`LearnConfig::min_decisive`], nothing could have been proposed no
+    /// matter how bad retrieval was, and the suite is the thing to change.
+    pub max_decisive_on_one_symbol: usize,
+    /// Symbols with enough evidence to be judged at all.
+    pub cleared_evidence_floor: usize,
+    /// …of those, how many also looked harmful enough to suppress.
+    pub also_looked_harmful: usize,
+    /// The floor these counts were taken against.
+    ///
+    /// Carried with the summary rather than looked up beside it, so a report
+    /// containing one of these is self-describing: "3 cleared the floor" means
+    /// nothing without knowing the floor was 5.
+    pub min_decisive: usize,
+}
+
+impl EvidenceSummary {
+    /// Mean decisive outcomes per symbol seen.
+    ///
+    /// The ratio that decides whether a suite can ever exercise the learner:
+    /// measured at 0.09 on a whole repository and 0.16 on a single hot module,
+    /// against the 5 one symbol needs. Both are starvation, and the second
+    /// being better did not make it sufficient.
+    pub fn outcomes_per_symbol(&self) -> f32 {
+        match self.symbols_seen {
+            0 => 0.0,
+            n => self.decisive_total as f32 / n as f32,
+        }
+    }
+}
+
 impl SymbolLedger {
     /// Fold one outcome in.
     ///
@@ -132,6 +174,39 @@ impl SymbolLedger {
             .values()
             .filter(|e| e.decisive() > 0)
             .count()
+    }
+
+    /// Why [`Self::propose`] returned what it did.
+    ///
+    /// A bare "0 proposals" is unactionable, because two different failures
+    /// produce it and they need opposite fixes:
+    ///
+    /// - **no symbol cleared the evidence floor** — the suite is too small or
+    ///   too scattered, and the answer is more tasks over the same code;
+    /// - **symbols cleared it and none looked harmful** — there is nothing to
+    ///   suppress, and more tasks will not change that.
+    ///
+    /// Reporting a zero without saying which of those it is invites the wrong
+    /// fix, and on this project the wrong fix would be lowering `min_decisive`
+    /// until noise qualifies.
+    pub fn evidence_summary(&self, cfg: LearnConfig) -> EvidenceSummary {
+        let mut s = EvidenceSummary {
+            symbols_seen: self.per_symbol.len(),
+            min_decisive: cfg.min_decisive,
+            ..Default::default()
+        };
+        for e in self.per_symbol.values() {
+            let d = e.decisive();
+            s.decisive_total += d;
+            s.max_decisive_on_one_symbol = s.max_decisive_on_one_symbol.max(d);
+            if e.is_actionable(cfg.min_decisive) {
+                s.cleared_evidence_floor += 1;
+                if e.success_rate().is_some_and(|r| r <= cfg.max_success_rate) {
+                    s.also_looked_harmful += 1;
+                }
+            }
+        }
+        s
     }
 
     pub fn record(&mut self, outcome: &CodeOutcome) {
