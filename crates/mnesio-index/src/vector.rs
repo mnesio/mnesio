@@ -25,13 +25,75 @@ use mnesio_core::{Hit, Id, MnesioError, Scope};
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
+/// Squared L2. Squared rather than the root because the ordering is identical
+/// and the score transform below is applied to whatever this returns — taking
+/// a root would change every score without changing a single rank.
+///
+/// Written out rather than reusing `DistL2` because `hnsw_rs`'s trait wants an
+/// owned distance type and this is two lines.
+fn l2(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
+}
+
 /// Per-slot metadata held outside the hnsw graph so we can post-filter on
 /// scope and resolve neighbors back to a [`MemoryRef`] without a store
 /// roundtrip.
 struct Slot {
     memory: MemoryRef,
     scope: Scope,
+    /// The slot's embedding, as already leaked for `hnsw_rs`.
+    ///
+    /// A borrowed pointer, not a second copy — the vector is `Box::leak`ed on
+    /// insert regardless, so retaining the slice costs 16 bytes per slot and
+    /// makes [`VectorView::search_exact`] possible without a store roundtrip.
+    embedding: &'static [f32],
 }
+
+/// Above this many slots, search falls back to approximate HNSW.
+///
+/// ## Why a threshold rather than a seed
+///
+/// The honest reason: **`hnsw_rs` 0.3.4 has no seed API.** Its `LayerGenerator`
+/// calls `StdRng::from_os_rng()` and exposes nothing to control it, so layer
+/// assignment — and therefore graph topology, and therefore which neighbours an
+/// approximate search returns near the cutoff — differs on every build. There
+/// is no version to upgrade to; 0.3.4 is current.
+///
+/// Measured consequence, before this: three *identical* warm starts of the same
+/// query returned different symbol sets — 8 files in every run, 4 in only some,
+/// Jaccard 0.75–1.00. At suite scale it averaged out to about ±2pp, which is
+/// why it went unnoticed, but a user re-running one query after a restart could
+/// get different code back with nothing saying so.
+///
+/// So below this size we do not approximate at all: an exact scan is
+/// deterministic by construction, and at these sizes it is also fast. Every
+/// code repository measured on this project sits far under it — 178 symbols for
+/// a module, 2 118 for this workspace, 5 690 for llama-index-core.
+///
+/// ## Where the number comes from
+///
+/// Measured with `mnesio-bench scale`, query p50 / p99, `k=10`:
+///
+/// | slots | path | p50 | p99 | recall@10 |
+/// |---|---|---|---|---|
+/// | 1 050 | exact | 0.91 ms | 1.35 ms | 100% |
+/// | 10 503 | exact | 1.50 ms | 1.83 ms | 100% |
+/// | 47 263 | exact | **3.93 ms** | 4.59 ms | 100% |
+/// | 52 515 | HNSW | 2.34 ms | 2.87 ms | 100% |
+///
+/// 3.93 ms at the top of the exact range is the cost being paid, and it is
+/// under the 5 ms budget Hard Rule #5 sets for the *write* path — a read this
+/// size is comfortably interactive. Past it HNSW is both faster and the only
+/// tractable option, so that is where the threshold sits.
+///
+/// The exact path also returns **exhaustive** results rather than approximate
+/// ones, so recall is 100% by construction rather than by measurement. The
+/// determinism was the goal; the recall is a side effect worth stating.
+///
+/// Above it, results remain approximate *and* non-reproducible across process
+/// restarts. That is a real, remaining limitation and it is stated in
+/// [`VectorView::is_deterministic`] rather than left for someone to discover.
+pub const EXACT_SEARCH_MAX_SLOTS: usize = 50_000;
 
 pub struct VectorView {
     index: RwLock<Hnsw<'static, f32, DistL2>>,
@@ -117,16 +179,21 @@ impl VectorView {
         if let Some(&prior) = self.by_memory.read().unwrap().get(&memory) {
             self.tombstones.write().unwrap().insert(prior);
         }
+        // `hnsw_rs` stores references with the index's lifetime. We elect
+        // 'static via `Box::leak`; see the module-level note on why this is
+        // acceptable for Phase 0. The slot keeps the same pointer, so the
+        // exact path costs no additional copy.
+        let leaked: &'static [f32] = Box::leak(embedding.to_vec().into_boxed_slice());
         let slot_id = {
             let mut slots = self.slots.write().unwrap();
             let id = slots.len();
-            slots.push(Slot { memory, scope });
+            slots.push(Slot {
+                memory,
+                scope,
+                embedding: leaked,
+            });
             id
         };
-        // `hnsw_rs` stores references with the index's lifetime. We elect
-        // 'static via `Box::leak`; see the module-level note on why this is
-        // acceptable for Phase 0.
-        let leaked: &'static [f32] = Box::leak(embedding.to_vec().into_boxed_slice());
         self.index.read().unwrap().insert((leaked, slot_id));
         self.by_memory.write().unwrap().insert(memory, slot_id);
         Ok(())
@@ -171,6 +238,12 @@ impl VectorView {
             return Ok(Vec::new());
         }
 
+        // Exact below the threshold — see `EXACT_SEARCH_MAX_SLOTS`. This is
+        // not an optimisation; it is what makes the result reproducible.
+        if total_slots <= EXACT_SEARCH_MAX_SLOTS {
+            return Ok(self.search_exact(query, k, scope));
+        }
+
         // Cap on how many adaptive doublings we'll do. Each iteration is
         // O(ef_search log N); 5 doublings of K*4 covers everything from
         // perfectly-dense filters (one pass) to one-in-a-million scopes
@@ -195,6 +268,59 @@ impl VectorView {
             over_k = over_k.saturating_mul(2);
         }
         Ok(hits)
+    }
+
+    /// Is this view's search reproducible across process restarts?
+    ///
+    /// `false` once the index outgrows [`EXACT_SEARCH_MAX_SLOTS`], because
+    /// `hnsw_rs` seeds its layer generator from OS entropy and offers no way
+    /// to fix it. Exposed rather than assumed so a caller that depends on
+    /// reproducibility — a benchmark comparing two arms, say — can assert it
+    /// instead of silently measuring build randomness.
+    pub fn is_deterministic(&self) -> bool {
+        self.slots.read().unwrap().len() <= EXACT_SEARCH_MAX_SLOTS
+    }
+
+    /// Exhaustive L2 scan, scope-filtered, with a total order on ties.
+    ///
+    /// Deterministic in three separate places, and all three are needed:
+    ///
+    /// 1. every live slot is considered, so there is no traversal to vary;
+    /// 2. distances are compared with `total_cmp`, so `NaN` cannot make the
+    ///    ordering depend on comparison order;
+    /// 3. ties break on slot id, which is insertion order — itself fixed by
+    ///    the event log (Hard Rule #4). Two equal distances would otherwise
+    ///    resolve by whatever order the sort happened to visit them.
+    ///
+    /// Sorted with `sort_by`, which is stable, so (2) and (3) together give a
+    /// total order rather than merely a consistent one.
+    fn search_exact(&self, query: &[f32], k: usize, scope: &Scope) -> Vec<Hit> {
+        let slots = self.slots.read().unwrap();
+        let tombstones = self.tombstones.read().unwrap();
+
+        let mut scored: Vec<(usize, f32)> = slots
+            .iter()
+            .enumerate()
+            .filter(|(id, slot)| !tombstones.contains(id) && scope.contains(&slot.scope))
+            .map(|(id, slot)| (id, l2(query, slot.embedding)))
+            .collect();
+
+        scored.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        scored.truncate(k);
+
+        scored
+            .into_iter()
+            .map(|(id, distance)| {
+                // Identical to the HNSW path's scoring, so switching between
+                // them cannot move a score and make the two look different.
+                let score = 1.0 / (1.0 + distance);
+                Hit {
+                    memory: slots[id].memory,
+                    score,
+                    breakdown: vec![("vector".to_string(), score)],
+                }
+            })
+            .collect()
     }
 
     /// Resolve raw HNSW neighbours against scope + tombstones into
@@ -393,6 +519,111 @@ mod tests {
             source: None,
             position: None,
         }
+    }
+
+    /// A fixed corpus, minted once.
+    ///
+    /// Both views must see the *same* memory ids or the comparison is
+    /// meaningless — a fresh `new_id()` per build would make the two differ by
+    /// construction rather than by graph topology, which is what the first
+    /// version of this test actually measured.
+    fn corpus(n: usize, scope: &Scope) -> Vec<Memory> {
+        (0..n)
+            .map(|i| {
+                let t = i as f32 * 0.37;
+                mem_with(
+                    &format!("m{i}"),
+                    scope.clone(),
+                    vec![t.cos(), t.sin(), (t * 0.5).cos(), (t * 0.25).sin()],
+                )
+            })
+            .collect()
+    }
+
+    async fn build(corpus: &[Memory]) -> VectorView {
+        let view = VectorView::new(4, "test");
+        for m in corpus {
+            view.apply(&entry(Event::MemoryWritten(m.clone())))
+                .await
+                .unwrap();
+        }
+        view
+    }
+
+    #[tokio::test]
+    async fn two_independent_builds_return_identical_results() {
+        // Phase 18A's unmet half. `hnsw_rs` seeds its layer generator from OS
+        // entropy with no way to fix it, so two builds of the same data are
+        // two different graphs — and an approximate search over them returned
+        // different neighbours near the cutoff. Measured before this fix:
+        // three identical warm starts, 8 files in every run, 4 in only some,
+        // Jaccard 0.75–1.00.
+        //
+        // Below the exact threshold there is no graph to differ.
+        let scope = Scope::global("t");
+        let data = corpus(200, &scope);
+        let a = build(&data).await;
+        let b = build(&data).await;
+        assert!(a.is_deterministic() && b.is_deterministic());
+
+        let q = [0.3f32, 0.9, 0.1, 0.4];
+        for k in [1usize, 5, 20] {
+            let ha = a.search(&q, k, &scope).unwrap();
+            let hb = b.search(&q, k, &scope).unwrap();
+            assert_eq!(ha.len(), k.min(data.len()));
+            let ids = |h: &[Hit]| h.iter().map(|x| x.memory).collect::<Vec<_>>();
+            // Same memories AND the same order — a set match would let a
+            // reshuffle pass, and order is what the packer's budget consumes.
+            assert_eq!(ids(&ha), ids(&hb), "k={k}: results must not vary by build");
+            let bits = |h: &[Hit]| h.iter().map(|x| x.score.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&ha), bits(&hb), "k={k}: scores must match bitwise");
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_searches_of_one_view_are_identical() {
+        let scope = Scope::global("t");
+        let view = build(&corpus(120, &scope)).await;
+        let q = [0.1f32, 0.2, 0.3, 0.4];
+        let first = view.search(&q, 10, &scope).unwrap();
+        for _ in 0..5 {
+            let again = view.search(&q, 10, &scope).unwrap();
+            assert_eq!(
+                first.iter().map(|h| h.memory).collect::<Vec<_>>(),
+                again.iter().map(|h| h.memory).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_exact_path_ranks_by_true_distance() {
+        // Determinism is worthless if it is deterministically wrong. The
+        // nearest vector must actually come first.
+        let scope = Scope::global("t");
+        let view = VectorView::new(4, "test");
+        let near = mem_with("near", scope.clone(), vec![1.0, 0.0, 0.0, 0.0]);
+        let mid = mem_with("mid", scope.clone(), vec![0.7, 0.7, 0.0, 0.0]);
+        let far = mem_with("far", scope.clone(), vec![0.0, 0.0, 0.0, 1.0]);
+        for m in [&near, &mid, &far] {
+            view.apply(&entry(Event::MemoryWritten(m.clone())))
+                .await
+                .unwrap();
+        }
+        let hits = view.search(&[1.0, 0.0, 0.0, 0.0], 3, &scope).unwrap();
+        assert_eq!(hits[0].memory, MemoryRef(near.id));
+        assert_eq!(hits[1].memory, MemoryRef(mid.id));
+        assert_eq!(hits[2].memory, MemoryRef(far.id));
+        // Descending score, matching the HNSW path's 1/(1+d) transform.
+        assert!(hits[0].score > hits[1].score && hits[1].score > hits[2].score);
+    }
+
+    #[tokio::test]
+    async fn a_view_past_the_threshold_admits_it_is_not_reproducible() {
+        // The claim must not silently become false at scale. `is_deterministic`
+        // is the honest predicate a benchmark can assert on.
+        let view = VectorView::new(4, "test");
+        assert!(view.is_deterministic(), "an empty view is trivially so");
+        assert_eq!(EXACT_SEARCH_MAX_SLOTS, 50_000);
     }
 
     fn entry(event: Event) -> LogEntry {
