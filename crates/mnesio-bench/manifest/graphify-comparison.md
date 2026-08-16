@@ -1,6 +1,11 @@
 # mnesio vs graphify — token cost of one coding task
 
-Measured 2026-08-09 across the pinned public corpus. **10 repositories, 7 of
+**Re-measured 2026-08-16** after retrieval was made deterministic. The updated
+distribution is at the end; the 2026-08-09 body below is kept because one
+number moved that neither tool explains, and hiding the earlier run would hide
+that.
+
+Originally measured 2026-08-09 across the pinned public corpus. **10 repositories, 7 of
 them large enough to discriminate, 40 tasks each.** Reproduction at the bottom.
 
 An earlier version of this file reported one repository and got the token ratio
@@ -163,3 +168,83 @@ python3 comparison/measure_mnesio.py <repo> 4000 40 target/release/mnesio-mcp
 
 Both scripts derive tasks and gold from `git log` in the repository they are
 pointed at, so there is no fixture to drift.
+
+
+---
+
+# Re-run 2026-08-16 — with a 0pp noise floor
+
+The first run carried a ±2pp floor from non-deterministic retrieval, which is
+why `click`'s −3pp had to be reported as a tie rather than a result. Retrieval
+below `EXACT_SEARCH_MAX_SLOTS` is now byte-reproducible (0 of 40 queries vary
+across processes, two repos), so the deltas can be read directly.
+
+**Both arms were checked for determinism this time**, not just ours: graphify
+returned identical numbers across 3 runs on flask and across 2 runs plus a full
+graph rebuild on serde. Neither tool is now a source of run-to-run noise.
+
+## Per-repository
+
+| repo | files | graphify @top-3 | graphify @all | mnesio | Δ@top-3 | Δ@all |
+|---|---|---|---|---|---|---|
+| zod | 403 | 42% | 58% | **65%** | +23 | +7 |
+| serde | 208 | 28% | 38% | **65%** | +37 | +27 |
+| express | 141 | 35% | 50% | **75%** | +40 | +25 |
+| ripgrep | 110 | 40% | 60% | **85%** | +45 | +25 |
+| flask | 83 | 45% | 60% | **90%** | +45 | +30 |
+| click | 78 | 48% | **75%** | 75% | +27 | **0** |
+| httpx | 60 | 68% | **90%** | 80% | +12 | **−10** |
+| requests ᵗ | 37 | 62% | 82% | 88% | +26 | +6 |
+| bytes ᵗ | 34 | 70% | 82% | 92% | +22 | +10 |
+| fd ᵗ | 24 | 45% | 75% | 95% | +50 | +20 |
+
+## Distribution over the 7 discriminating repositories
+
+| | min | p25 | median | p75 | max |
+|---|---|---|---|---|---|
+| graphify recall @top-3 | 28% | 38% | **42%** | 47% | 68% |
+| mnesio recall | 65% | 70% | **75%** | 83% | 90% |
+| **delta @top-3** | +12pp | +25pp | **+37pp** | +43pp | +45pp |
+| token ratio @top-3 | 2.2× | 2.6× | **3.7×** | 6.0× | 11.6× |
+| graphify recall @all | 38% | 54% | **60%** | 68% | 90% |
+| **delta @all** | **−10pp** | +4pp | **+25pp** | +26pp | +30pp |
+| token ratio @all | 7.9× | 12.4× | **15.5×** | 19.9× | 25.2× |
+
+## What changed from the first run, and why
+
+**mnesio moved +0 to +3pp** — zod 62→65, express 72→75, flask 88→90, the other
+four unchanged. That is the exact-search fix: an exhaustive scan finds what an
+approximate one missed. Small and in the expected direction.
+
+**Two rows now resolve that previously could not.**
+
+- **click was −3pp, now exactly 0.** Under the old floor it had to be called a
+  tie on the grounds that it *might* be one. It is one.
+- **httpx was −8pp, now −10pp.** graphify genuinely wins there at the all-files
+  policy, 90% vs 80%, for 15× the tokens. That was a real result before and it
+  is a slightly larger one now.
+
+## The number neither tool explains
+
+**serde's graphify @top-3 was 32% on 2026-08-09 and is 28% now**, and I cannot
+account for it. graphify is deterministic on that repository — 28% across two
+runs and across a full `graphify-out` rebuild — and the suite has the same 40
+tasks and the same 208 files in both runs.
+
+The remaining difference is the *clone*. The corpus is materialized with
+`git clone --depth 400` followed by `git checkout <pin>`, and **`--depth` is
+relative to the cloned HEAD, not to the pin**. Upstream moves, so a later clone
+truncates history at a different place and the set of the pin's ancestors that
+are actually present can differ. The manifest pins the tree; it does not pin
+what history is reachable from it.
+
+So the corpus is less reproducible than "pinned" implies, and the fix is to
+fetch the pinned commit directly rather than shallow-clone and rewind. Until
+that lands, **a cross-run comparison of these numbers is not sound**; each run
+is internally consistent, and only the within-run deltas should be quoted.
+
+## Everything the first run disclaimed still applies
+
+graphify ran AST-only (its semantic extraction wants an API key), scoring is
+file-level which flatters both tools, and mnesio references more files per
+answer which inflates the all-files row. None of that changed.
