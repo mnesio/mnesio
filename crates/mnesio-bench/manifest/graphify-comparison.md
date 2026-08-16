@@ -224,24 +224,32 @@ approximate one missed. Small and in the expected direction.
   policy, 90% vs 80%, for 15× the tokens. That was a real result before and it
   is a slightly larger one now.
 
-## The number neither tool explains
+## The number neither tool explained — resolved, and I was wrong twice
 
-**serde's graphify @top-3 was 32% on 2026-08-09 and is 28% now**, and I cannot
-account for it. graphify is deterministic on that repository — 28% across two
-runs and across a full `graphify-out` rebuild — and the suite has the same 40
-tasks and the same 208 files in both runs.
+serde's graphify @top-3 was 32% on 2026-08-09 and 28% on 2026-08-16. I gave two
+explanations for it before finding the real one, and both were wrong:
 
-The remaining difference is the *clone*. The corpus is materialized with
-`git clone --depth 400` followed by `git checkout <pin>`, and **`--depth` is
-relative to the cloned HEAD, not to the pin**. Upstream moves, so a later clone
-truncates history at a different place and the set of the pin's ancestors that
-are actually present can differ. The manifest pins the tree; it does not pin
-what history is reachable from it.
+1. **"The shallow clone truncates history differently."** Checked: the
+   by-pin checkout and the shallow-clone-then-rewind produce the *same* 1 400
+   reachable commits and the same HEAD.
+2. **"The manifest pins the tree but not reachable history."** Also wrong, and
+   worse — it asserted a defect in shipped code. `manifest::materialize`
+   already does `git init` + `git fetch --depth N origin <pin>` + `checkout`,
+   so depth is relative to the pin, not to HEAD. It was correct all along.
 
-So the corpus is less reproducible than "pinned" implies, and the fix is to
-fetch the pinned commit directly rather than shallow-clone and rewind. Until
-that lands, **a cross-run comparison of these numbers is not sound**; each run
-is internally consistent, and only the within-run deltas should be quoted.
+**The actual cause: the harness did not pin the competitor's version.**
+`uvx --from graphifyy` resolves the *latest* release at run time. The two runs
+used graphify **0.9.37** and **0.9.44** — two different products.
+
+Confirmed by re-pinning and re-running: 0.9.37 reproduces **32% / 42%**
+exactly, 0.9.44 gives **28% / 38%**. So graphify got *worse* on serde between
+those releases, and the corpus, the manifest and both tools' determinism were
+never involved.
+
+The harness now pins `graphifyy==0.9.44` and **emits the version in every
+result**, because a number without the version it was measured against cannot
+be compared to anything. The 2026-08-09 numbers should be read as 0.9.37 and
+the 2026-08-16 numbers as 0.9.44 — not as one superseding the other.
 
 ## Everything the first run disclaimed still applies
 

@@ -20,6 +20,19 @@ agent in front of the code the commit changed?
 """
 import json, os, re, subprocess, sys
 
+# The competitor's version is pinned, and that is not a detail.
+#
+# graphify is installed with `uvx --from graphifyy`, which resolves the *latest*
+# release at run time. Two corpus runs a week apart therefore benchmarked two
+# different products: 0.9.37 on 2026-08-09 and 0.9.44 on 2026-08-16. That alone
+# moved serde from 32/42 to 28/38 percent — reproduced exactly by re-pinning to
+# 0.9.37 and re-running.
+#
+# Two wrong explanations were chased first (a shallow-clone depth in the corpus,
+# then the manifest itself); both were checked and cleared. Pin the dependency,
+# and record it in the output, so the next person does not repeat that.
+GRAPHIFY = "graphifyy==0.9.44"
+
 REPO = sys.argv[1]
 BUDGET = int(sys.argv[2]) if len(sys.argv) > 2 else 2000
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 60
@@ -60,7 +73,7 @@ def file_tokens(path):
 rows = []
 for i, (subj, gold) in enumerate(tasks):
     out = subprocess.run(
-        ["uvx", "--from", "graphifyy", "graphify", "query", subj, "--budget", str(BUDGET)],
+        ["uvx", "--from", GRAPHIFY, "graphify", "query", subj, "--budget", str(BUDGET)],
         cwd=REPO, capture_output=True, text=True).stdout
     # Order matters: the output is BFS order, which is the only ranking signal
     # an agent has for deciding what to open first.
@@ -95,6 +108,9 @@ def med(xs): return sorted(xs)[len(xs) // 2]
 print(json.dumps({
     "tasks": len(rows),
     "budget": BUDGET,
+    # Emitted, not just pinned: a number without the version it was measured
+    # against cannot be compared to anything.
+    "graphify": GRAPHIFY,
     "recall_all_cited_pct": pct([r["hit"] for r in rows]),
     "recall_top3_pct": pct([r["hit_top3"] for r in rows]),
     "recall_top5_pct": pct([r["hit_top5"] for r in rows]),

@@ -11,6 +11,19 @@ and both tools score high by arithmetic rather than by ranking.
 """
 import json, os, subprocess, sys
 
+# The competitor's version is pinned, and that is not a detail.
+#
+# graphify is installed with `uvx --from graphifyy`, which resolves the *latest*
+# release at run time. Two corpus runs a week apart therefore benchmarked two
+# different products: 0.9.37 on 2026-08-09 and 0.9.44 on 2026-08-16. That alone
+# moved serde from 32/42 to 28/38 percent — reproduced exactly by re-pinning to
+# 0.9.37 and re-running.
+#
+# Two wrong explanations were chased first (a shallow-clone depth in the corpus,
+# then the manifest itself); both were checked and cleared. Pin the dependency,
+# and record it in the output, so the next person does not repeat that.
+GRAPHIFY = "graphifyy==0.9.44"
+
 CORPUS = sys.argv[1]
 MCP = sys.argv[2]
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 40
@@ -30,7 +43,7 @@ for name in repos:
     print(f"\n### {name} ({n_files} code files)", file=sys.stderr)
 
     print("  graphify: indexing…", file=sys.stderr)
-    subprocess.run(["uvx", "--from", "graphifyy", "graphify", "update", "."],
+    subprocess.run(["uvx", "--from", GRAPHIFY, "graphify", "update", "."],
                    cwd=path, capture_output=True, text=True)
     print("  graphify: querying…", file=sys.stderr)
     g = subprocess.run([sys.executable, f"{HERE}/measure.py", path, "2000", str(N)],
@@ -48,6 +61,7 @@ for name in repos:
         print(f"  SKIP {name}: no tasks derived", file=sys.stderr)
         continue
     out.append({
+        "graphify": GRAPHIFY,
         "repo": name, "files": n_files, "tasks": gj["tasks"],
         "small": n_files < MIN_FILES,
         "g_recall_top3": gj["recall_top3_pct"], "g_recall_all": gj["recall_all_cited_pct"],
