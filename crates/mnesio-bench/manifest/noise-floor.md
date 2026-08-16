@@ -22,24 +22,37 @@ under ~4pp.
 **Deltas above ~1pp are now findings.** The previous ±2pp guard is obsolete;
 a claim no longer has to clear it.
 
-## What is still not deterministic
+## Byte-level determinism: now achieved
 
-Byte-for-byte, the answer to a single query is **not** stable yet. Measured on
-tare, 40 real tasks, 3 fresh processes each:
+Measured, 40 real tasks, 3 fresh processes each:
 
-| stage | queries returning different context |
-|---|---|
-| before any fix | (not measured this way) |
-| after exact `VectorView` | **10 of 40** |
-| after RRF total order | 10 of 40 |
-| after reranker total order | **9 of 40** |
+| stage | tare | claw-code api |
+|---|---|---|
+| after exact `VectorView` | 10 of 40 varied | — |
+| after RRF total order | 10 of 40 | — |
+| after reranker total order | 9 of 40 | — |
+| **after BM25 OR-merge total order** | **0 of 40** | **0 of 40** |
 
-So the sort fixes were correct but not the binding constraint — 10 → 9 is
-inside the measurement's own variation. The remaining source is *upstream of
-sorting*: the scores or candidate sets themselves differ between processes.
-The most likely candidate is `tantivy`'s BM25, whose collection statistics and
-doc ordering depend on segment layout, which depends on indexing threads. That
-is a hypothesis, not a finding — it has not been isolated.
+The hypothesis in the first version of this file — "most likely tantivy's BM25,
+segment layout, indexing threads" — was **half right and wrong about the
+mechanism**. It was BM25. It was not segments or threads: pinning the writer to
+one indexing thread changed nothing, and a purpose-built test showed two
+indexes returning a *matching score multiset* in a different order. Equal
+scores, different order — a tie-break, not a scoring difference.
+
+Three tie-breaks had to become total, and only the third was on the runtime
+path:
+
+1. `HybridRetriever` fusion — sorted a vec drained from a `HashMap`.
+2. `LexicalReranker` — "ties keep their fused order", which inherits whatever
+   came in.
+3. **`Bm25View::merge_by_memory`** — `into_values()` on a `HashMap`, then
+   `Ordering::Equal` on ties. This is the OR-merge tier, which is what real
+   queries actually hit, which is why fixing the other two moved 10 → 9.
+
+`run_search` also over-fetches by 4× before truncating: `TopDocs::with_limit(k)`
+cuts *inside* a tie group by tantivy DocId, and no amount of sorting afterwards
+recovers members already discarded.
 
 **Why the suite metric is stable anyway.** Every observed difference is at the
 *budget boundary*: signature-only symbols that barely fit, swapping places. A

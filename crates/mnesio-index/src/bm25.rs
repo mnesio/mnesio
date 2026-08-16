@@ -141,6 +141,13 @@ impl Bm25View {
 
         // 50MB is tantivy's documented minimum heap; fine for any demo-scale
         // log and well within the workspace memory budget.
+        //
+        // Left multi-threaded on purpose. Pinning it to one indexing thread was
+        // tried as a determinism fix and **did not work** — two indexes built
+        // single-threaded from byte-identical input still ranked differently,
+        // so segment/DocId assignment was never the cause. Paying the
+        // throughput for a fix that does not fix anything would be worse than
+        // not trying. The real cause was tie-breaking; see `run_search`.
         let writer: IndexWriter = index
             .writer(50_000_000)
             .map_err(|e| MnesioError::Index(format!("tantivy writer init: {e}")))?;
@@ -450,8 +457,23 @@ impl Bm25View {
         query: &dyn Query,
         k: usize,
     ) -> Result<Vec<Hit>, MnesioError> {
+        // Over-fetch, then impose a total order, then truncate. Asking
+        // `TopDocs` for exactly `k` is not enough: it truncates *inside* a tie
+        // group using tantivy's internal DocId, which is not stable between two
+        // indexes built from identical input. Sorting afterwards cannot repair
+        // that — the wrong members of the group are already gone.
+        //
+        // Isolated by `two_identical_indexes_rank_identically`, which failed in
+        // a single process with a *matching score multiset*: equal scores,
+        // different documents. It kept failing after a sort was added and after
+        // indexing was pinned to one thread. Widening the window is what fixed
+        // it.
+        const TIE_WINDOW: usize = 4;
         let top_docs = searcher
-            .search(query, &TopDocs::with_limit(k))
+            .search(
+                query,
+                &TopDocs::with_limit(k.saturating_mul(TIE_WINDOW).max(64)),
+            )
             .map_err(|e| MnesioError::Index(format!("bm25 search: {e}")))?;
 
         let mut hits = Vec::with_capacity(top_docs.len());
@@ -472,6 +494,28 @@ impl Bm25View {
                 breakdown: vec![("bm25".to_string(), score)],
             });
         }
+        // Descending score, then memory id. `TopDocs` breaks ties by tantivy's
+        // internal DocId, which is not stable between two indexes built from
+        // identical input — isolated by
+        // `two_identical_indexes_rank_identically`, which failed *within one
+        // process* while the score multiset matched exactly. Equal scores,
+        // different order.
+        //
+        // This was the last surviving source of the run-to-run instability that
+        // outlived making `VectorView` exact and giving both fusion sorts a
+        // total order: BM25 fed a different order in, and everything
+        // downstream faithfully preserved it.
+        //
+        // Still bounded rather than absolute: a tie group wider than
+        // `k * TIE_WINDOW` would again be cut by tantivy before this sort sees
+        // it. That is far wider than real corpora produce, but it is a window,
+        // not a proof.
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.memory.0.cmp(&b.memory.0))
+        });
+        hits.truncate(k);
         Ok(hits)
     }
 }
@@ -494,11 +538,16 @@ fn merge_by_memory(a: Vec<Hit>, b: Vec<Hit>, k: usize) -> Vec<Hit> {
             }
         }
     }
+    // `into_values()` yields in `HashMap` order, which Rust seeds per process,
+    // and `Ordering::Equal` on a tie then preserved that order verbatim. This
+    // is the *runtime* path — the OR-merge tier — so fixing `run_search` alone
+    // changed nothing end to end: 10 of 40 real queries still varied across
+    // processes until this sort became total.
     let mut merged: Vec<Hit> = by_id.into_values().collect();
     merged.sort_by(|x, y| {
         y.score
-            .partial_cmp(&x.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&x.score)
+            .then(x.memory.0.cmp(&y.memory.0))
     });
     merged.truncate(k);
     merged
@@ -579,6 +628,63 @@ mod tests {
             provenance: Provenance::default(),
             source: None,
             position: None,
+        }
+    }
+
+    /// Two views, identical corpus, identical insertion order.
+    ///
+    /// Isolates BM25 from the rest of the pipeline. `VectorView` was made
+    /// exact and both fusion sorts were given a total order, yet 9 of 40 real
+    /// queries still returned different context across processes. If this test
+    /// fails, the remaining non-determinism is tantivy's; if it passes, BM25 is
+    /// exonerated and the hunt moves elsewhere.
+    #[tokio::test]
+    async fn two_identical_indexes_rank_identically() {
+        let scope = Scope::global("t");
+        let docs: Vec<Memory> = (0..60)
+            .map(|i| {
+                mem_with(
+                    // Deliberately repetitive: shared vocabulary produces tied
+                    // BM25 scores, which is exactly where doc order decides
+                    // the outcome and where the instability was observed.
+                    &format!(
+                        "retry backoff handler for request path {} with timeout",
+                        i % 7
+                    ),
+                    &["code"],
+                    scope.clone(),
+                )
+            })
+            .collect();
+
+        let build = || async {
+            let v = Bm25View::new().unwrap();
+            for m in &docs {
+                v.apply(&entry(Event::MemoryWritten(m.clone())))
+                    .await
+                    .unwrap();
+            }
+            v
+        };
+        let a = build().await;
+        let b = build().await;
+
+        for q in ["retry backoff", "timeout handler", "request path"] {
+            let ha = a.search(q, 20, &scope).unwrap();
+            let hb = b.search(q, 20, &scope).unwrap();
+            // Scores first, deliberately: if the *multiset* of scores matches
+            // and only the order differs, this is a tie-break problem and a
+            // total order fixes it. If the scores themselves differ, it is not.
+            let mut sa: Vec<u32> = ha.iter().map(|h| h.score.to_bits()).collect();
+            let mut sb: Vec<u32> = hb.iter().map(|h| h.score.to_bits()).collect();
+            sa.sort_unstable();
+            sb.sort_unstable();
+            assert_eq!(sa, sb, "query {q:?}: the score multiset must match");
+            assert_eq!(
+                ha.iter().map(|h| h.memory).collect::<Vec<_>>(),
+                hb.iter().map(|h| h.memory).collect::<Vec<_>>(),
+                "query {q:?}: two identical indexes must rank identically"
+            );
         }
     }
 
