@@ -249,6 +249,15 @@ pub fn pack(seeds: &[MemoryRef], src: &dyn PackSource, cfg: PackConfig) -> Packe
     }
 
     // --- 2. one hop along Calls ---
+    // TODO(phase-18): expansion is the last known source of cross-process
+    // non-determinism. On serde, one task in forty packs a different symbol set
+    // across fresh processes *even with a deterministic embedder*, and the
+    // differing entries are all `Reason::Expanded`. This loop is order-faithful
+    // — it walks `seeds` and `src.links` as given — so the variance is upstream,
+    // in how a link vector is built. Ruled out: file-walk order (sorted), index
+    // stats (identical over 4 re-indexes), ULID ordering (`new_id` is strictly
+    // monotonic). Until this is closed, the A/B noise floor on a repository of
+    // this size is 7pp, not 0pp — see `manifest/noise-floor.md`.
     if cfg.expand {
         for &m in seeds {
             let mut taken = 0usize;
