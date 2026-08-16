@@ -219,17 +219,27 @@ graph rebuild on serde. Neither tool is now a source of run-to-run noise.
 four unchanged. That is the exact-search fix: an exhaustive scan finds what an
 approximate one missed. Small and in the expected direction.
 
-**graphify moved on one row, and that one is not ours** — serde 32→28 at
-top-3, because the two runs used different graphify releases. See below; it is
-the reason the version is now pinned and emitted.
+**graphify moved on three rows, and none of them are ours** — serde 32→28 at
+top-3 and 42→38 at all-files, click 78→75 at all-files, httpx 88→90 at
+all-files. All three are the version change.
 
-**Two rows now resolve that previously could not.**
+**An earlier version of this section credited two of those to our fix, and that
+was wrong.** It read: *"click was −3pp, now exactly 0"* and *"httpx was −8pp,
+now −10pp"*, presented as consequences of making retrieval deterministic.
+**mnesio's number did not move on either repository** — click 75% and httpx 80%
+in both runs. Both deltas changed because *graphify's* number moved underneath
+them. Diffing the two result files makes it unambiguous:
 
-- **click was −3pp, now exactly 0.** Under the old floor it had to be called a
-  tie on the grounds that it *might* be one. It is one.
-- **httpx was −8pp, now −10pp.** graphify genuinely wins there at the all-files
-  policy, 90% vs 80%, for 15× the tokens. That was a real result before and it
-  is a slightly larger one now.
+| | mnesio moved | graphify moved |
+|---|---|---|
+| zod, express, flask | ✓ | |
+| serde, click, httpx | | ✓ |
+| ripgrep, requests, bytes, fd | | |
+
+**The two sides moved on disjoint sets of repositories.** That separation is
+itself the evidence: the exact-search fix touched only our arm, the version bump
+only theirs. Reading a Δ column without asking *which side moved* is what
+produced the wrong attribution, and the diff above is now the standard check.
 
 ## The number neither tool explained — resolved, and I was wrong twice
 
@@ -263,3 +273,95 @@ the 2026-08-16 numbers as 0.9.44 — not as one superseding the other.
 graphify ran AST-only (its semantic extraction wants an API key), scoring is
 file-level which flatters both tools, and mnesio references more files per
 answer which inflates the all-files row. None of that changed.
+
+
+---
+
+# Re-run 2026-08-16 (second) — competitor version pinned
+
+The first run with `graphifyy==0.9.44` **pinned and recorded in the output**.
+Same corpus, verified against all ten manifest pins; graphify's index state
+deleted first so 0.9.44 built from scratch; `mnesio-mcp` at the current HEAD.
+
+## The version pin works
+
+**Nine of ten repositories reproduced exactly** — recall *and* median token
+count, to the digit. graphify reproduced on all ten. So with the version fixed,
+the competitor arm is fully deterministic and the harness is reproducible.
+
+## The tenth repository is the finding
+
+serde's **mnesio** arm moved 65% → 62%. Repeating it alone:
+
+| run | 1 | 2 | 3 | corpus 08-16 | corpus re-run |
+|---|---|---|---|---|---|
+| serde recall | 65% | 58% | 60% | 65% | 62% |
+
+**A 7pp spread.** The `noise-floor.md` claim of 0pp was measured on two small
+repositories and does not hold here; that file is corrected, and the floor to
+quote on a serde-sized repository is **7pp**, not 0pp.
+
+Diagnosed as two sources: fastembed's ONNX inference is not bit-reproducible
+across processes (2 of 3 varying tasks), plus one source that survives a
+deterministic embedder and lives in 1-hop graph expansion (root cause open).
+Full workings in `noise-floor.md`.
+
+## Per-repository
+
+| repo | files | graphify @top-3 | graphify @all | mnesio | Δ@top-3 | Δ@all |
+|---|---|---|---|---|---|---|
+| zod | 403 | 42% / 23 647 | 58% / 35 655 | **65% / 2 902** | +23 | +7 |
+| serde | 208 | 28% / 9 622 | 38% / 34 204 | **62% / 4 335** ⚠ | +34 | +24 |
+| express | 141 | 35% / 5 766 | 50% / 30 709 | **75% / 1 955** | +40 | +25 |
+| ripgrep | 110 | 40% / 51 234 | 60% / 111 052 | **85% / 4 393** | +45 | +25 |
+| flask | 83 | 45% / 10 132 | 60% / 52 517 | **90% / 4 208** | +45 | +30 |
+| click | 78 | 48% / 16 377 | **75%** / 100 739 | 75% / 4 166 | +27 | **0** |
+| httpx | 60 | 68% / 15 819 | **90%** / 65 387 | 80% / 4 226 | +12 | **−10** |
+| requests ᵗ | 37 | 62% / 30 767 | 82% / 80 329 | 88% / 4 305 | +26 | +6 |
+| bytes ᵗ | 34 | 70% / 24 687 | 82% / 50 997 | 92% / 2 846 | +22 | +10 |
+| fd ᵗ | 24 | 45% / 20 477 | 75% / 41 599 | 95% / 4 300 | +50 | +20 |
+
+⚠ serde's mnesio cell is unstable across runs (58–65%); every other cell
+reproduced exactly.
+
+## Distribution over the 7 discriminating repositories
+
+| | min | p25 | median | p75 | max |
+|---|---|---|---|---|---|
+| graphify recall @top-3 | 28% | 40% | **42%** | 48% | 68% |
+| mnesio recall | 62% | 75% | **75%** | 85% | 90% |
+| **delta @top-3** | +12pp | +27pp | **+34pp** | +45pp | +45pp |
+| token ratio @top-3 | 2.2× | 2.9× | **3.7×** | 8.1× | 11.7× |
+| graphify recall @all | 38% | 58% | **60%** | 75% | 90% |
+| **delta @all** | **−10pp** | +7pp | **+24pp** | +25pp | +30pp |
+| token ratio @all | 7.9× | 12.5× | **15.5×** | 24.2× | 25.3× |
+
+The median delta reads +34pp rather than the +37pp of the previous run purely
+because serde landed on 62 instead of 65 this time. Within the 7pp floor —
+which is the point of having one.
+
+## The standing summary, with its unflattering half attached
+
+**mnesio wins the median at both policies** — +34pp at top-3 and +24pp at
+all-files — for 3.7× to 15.5× fewer tokens.
+
+**graphify wins httpx outright** at all-files, 90% vs 80%, and that survives
+the noise floor. **click is an exact tie.** So at the policy most generous to
+graphify it is 5 wins, 1 loss, 1 tie out of 7 — not a sweep.
+
+And unchanged from the first run: graphify ran **AST-only** (its semantic
+extraction wants an API key), scoring is **file-level**, which is an easier
+question than the symbol-level one `codeeval` asks of mnesio, and mnesio cites
+more files per answer, which inflates the all-files row.
+
+## Reproducing
+
+```bash
+python3 comparison/run_corpus.py <corpus-dir> target/release/mnesio-mcp 40 \
+  > results.json
+python3 comparison/summarize.py results.json [prior.json]
+```
+
+`summarize.py` prints the distribution and, given a prior run, a per-repository
+diff that shows **which side moved** — the check whose absence produced the
+misattribution corrected above.

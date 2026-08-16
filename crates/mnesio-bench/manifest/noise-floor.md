@@ -3,6 +3,10 @@
 Measured 2026-08-16, after making `VectorView` exact below 50 000 slots and
 giving both the RRF fusion and the reranker a total order.
 
+> **Retracted the same day — see "The 0pp claim was wrong" at the end.** The
+> 0pp figure below is real for the two repositories it was measured on and
+> **does not generalise**. serde varies by 7pp. Do not cite 0pp.
+
 ## The number that governs A/B claims
 
 **Suite recall is now stable to 0pp.** Same suite, repeated with a fresh
@@ -86,3 +90,94 @@ done
 # per-query byte stability
 python3 comparison/measure_determinism.py <repo> target/release/mnesio-mcp "<task>" 4
 ```
+
+
+---
+
+# The 0pp claim was wrong — measured 2026-08-16, same day
+
+Re-running the pinned graphify corpus caught it. Nine of ten repositories
+reproduced *exactly*, recall and median token count alike. serde did not:
+**65% on the first run, 62% on the re-run.** Repeating serde's arm alone:
+
+| run | 1 | 2 | 3 | corpus (08-16) | corpus (re-run) |
+|---|---|---|---|---|---|
+| recall | 65% | 58% | 60% | 65% | 62% |
+
+**A 7pp spread, not 0pp.** Median token count was 4 335 in every run, so the
+packer is stable in *size* while varying in *content*.
+
+## What the original measurement got wrong
+
+It was taken on `tare` (35 files) and `claw-code api/src` — two small corpora —
+and stated as a property of the system. It is a property of those corpora.
+serde is 237 files and 1 977 symbols, and it varies. **A floor measured on the
+smallest available repositories is not a floor.** This is the same mistake
+`scaleeval` already caught twice on this project, where tiny repositories
+scored 100%/100% by arithmetic and inflated the distribution; the fix there was
+`MIN_DISCRIMINATING_SYMBOLS`, and the same discipline was simply not applied
+here.
+
+The per-query probe reinforced the error. `measure_determinism.py` takes **one**
+task and repeats it. On serde it reports `bytes_identical: true`, Jaccard 1.00
+across four fresh processes — because the task it was handed (index 0) is one of
+the 37 stable ones. **One query is a sample, not a proof.**
+
+## What actually varies, measured
+
+Per-task hits over three fresh processes on serde, 40 tasks, fastembed:
+
+```
+run1 (62%): 1000111101010011111100110111100100011111
+run2 (57%): 1000111101010011110100110101100100011111
+run3 (65%): 1000111101010011111100110111101100011111
+                              ^      ^   ^
+disagreeing tasks: 18, 26, 30  (3 of 40)
+```
+
+Swapping in the deterministic `MockEmbedder`, same protocol:
+
+```
+mock: disagreeing tasks: 18  (1 of 40)
+```
+
+So there are **two** sources:
+
+1. **fastembed accounts for 2 of the 3.** ONNX inference is not bit-reproducible
+   across processes, so embeddings differ in their low bits, and candidates
+   that are near-tied on distance swap places.
+2. **One source survives a deterministic embedder** — task 18, in 1 run of 3.
+   Diffing its context shows the differing entries are labelled *"called by a
+   match"*: **graph expansion**, not seed retrieval. Run 0 and run 2 are
+   byte-identical; run 1 packs 26 symbols instead of 23.
+
+## What has been ruled out for source 2
+
+Each of these was checked, not assumed:
+
+- **Approximate vector search.** serde is 1 977 symbols, far below
+  `EXACT_SEARCH_MAX_SLOTS` (50 000), so `VectorView` is on the exact path.
+- **File-walk order.** `memory.rs` sorts the file list before parsing.
+- **Index instability.** Four re-indexes of serde give identical
+  `1977 symbols / 927 resolved calls / 941 communities`.
+- **A warm-up race against async embedding.** The disagreements are at tasks
+  18, 26 and 30 — tasks 0–17 are identical in every run. A race against the
+  embedding worker would cluster at the start.
+- **ULID tie-break ordering.** `new_id()` is strictly monotonic within a
+  process and creation order is deterministic, so ids sort the same way in
+  every run even though their absolute values differ.
+
+**The root cause is not yet identified.** It is somewhere in link-vector
+construction or 1-hop expansion. `// TODO(phase-18):` — this stays open, and no
+A/B on this project may claim a delta under **7pp** on a serde-sized repository
+until it is closed.
+
+## The floor to use
+
+| corpus | measured floor |
+|---|---|
+| tare (35 files), claw-code api/src | 0pp, 5–6 runs |
+| serde (237 files, 1 977 symbols) | **7pp**, 5 runs |
+
+Quote the second. The first is not wrong, it is not general — and a floor is
+only useful as an upper bound.
