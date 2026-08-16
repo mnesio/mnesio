@@ -2,8 +2,9 @@
 
 **Re-measured 2026-08-16** after retrieval was made deterministic. The updated
 distribution is at the end; the 2026-08-09 body below is kept because one
-number moved that neither tool explains, and hiding the earlier run would hide
-that.
+number moved between the two runs, and hiding the earlier run would hide that.
+It is now explained — the competitor's own version was not pinned — and the
+two runs therefore measured graphify **0.9.37** and **0.9.44** respectively.
 
 Originally measured 2026-08-09 across the pinned public corpus. **10 repositories, 7 of
 them large enough to discriminate, 40 tasks each.** Reproduction at the bottom.
@@ -160,8 +161,10 @@ use of outcomes.
 ## Reproducing
 
 ```bash
-# clone the pinned corpus at its recorded commits, then per repo:
-uvx --from graphifyy graphify update .
+# clone the pinned corpus at its recorded commits, then per repo.
+# The version is pinned: `--from graphifyy` alone resolves whatever is latest,
+# which is exactly how the two runs below ended up measuring different builds.
+uvx --from graphifyy==0.9.44 graphify update .
 python3 comparison/measure.py        <repo> 2000 40
 python3 comparison/measure_mnesio.py <repo> 4000 40 target/release/mnesio-mcp
 ```
@@ -215,6 +218,10 @@ graph rebuild on serde. Neither tool is now a source of run-to-run noise.
 **mnesio moved +0 to +3pp** — zod 62→65, express 72→75, flask 88→90, the other
 four unchanged. That is the exact-search fix: an exhaustive scan finds what an
 approximate one missed. Small and in the expected direction.
+
+**graphify moved on one row, and that one is not ours** — serde 32→28 at
+top-3, because the two runs used different graphify releases. See below; it is
+the reason the version is now pinned and emitted.
 
 **Two rows now resolve that previously could not.**
 
