@@ -1,5 +1,8 @@
 /target
-/mnesio-data
+# Unanchored: the MCP server defaults to `./mnesio-data` relative to its CWD,
+# so a benchmark run drops one wherever the harness was launched from. An
+# anchored `/mnesio-data` missed the nested copies and one was committed.
+mnesio-data/
 /mneme-data
 **/*.rs.bk
 Cargo.lock

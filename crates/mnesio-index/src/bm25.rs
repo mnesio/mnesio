@@ -148,6 +148,19 @@ impl Bm25View {
         // so segment/DocId assignment was never the cause. Paying the
         // throughput for a fix that does not fix anything would be worse than
         // not trying. The real cause was tie-breaking; see `run_search`.
+        //
+        // Re-tested 2026-08-16 across *processes* (the earlier test was
+        // in-process) on serde, 40 tasks, deterministic MockEmbedder to hold
+        // the vector side fixed. At three runs it looked like a fix — recall
+        // variance 1/40 → 0/40, bytes 12/40 → 4/40. At six runs, paired, the
+        // effect vanished:
+        //
+        //   multi-threaded:  1/40 tasks vary in recall, 12/40 in bytes
+        //   single-threaded: 1/40 tasks vary in recall, 10/40 in bytes
+        //
+        // Same task (18) varying in both arms. `OMP_NUM_THREADS=1` looked like
+        // a fix at four runs (0/40) and also evaporated. Both were underpowered
+        // samples, not effects. Do not re-litigate this without n ≥ 6 per arm.
         let writer: IndexWriter = index
             .writer(50_000_000)
             .map_err(|e| MnesioError::Index(format!("tantivy writer init: {e}")))?;

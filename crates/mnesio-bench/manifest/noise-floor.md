@@ -181,3 +181,79 @@ until it is closed.
 
 Quote the second. The first is not wrong, it is not general — and a floor is
 only useful as an upper bound.
+
+
+---
+
+# Two candidate fixes, both retracted — measured 2026-08-16
+
+Chasing the open source above produced two apparent fixes. **Both were sampling
+artefacts, and both were caught only by re-measuring at a larger n.** Recording
+them so the next attempt does not spend the same afternoon.
+
+## Candidate 1 — single-threaded tantivy writer
+
+`Bm25View` builds its `IndexWriter` with `index.writer(50MB)`, which uses
+tantivy's default thread count. Multi-threaded indexing distributes documents
+over threads, so segment layout — and DocId assignment with it — can differ per
+process. `TopDocs(limit)` cuts *inside* a tie group by DocId before `run_search`
+ever sees the candidates, so a total order applied afterwards cannot recover a
+member already discarded. A real mechanism, and the existing comment in
+`bm25.rs` dismissing it had only ever been tested *in-process*.
+
+**At three runs it looked like a clean win**, mock embedder to hold the vector
+side fixed:
+
+| writer | recall varies | bytes vary |
+|---|---|---|
+| multi-threaded | 1/40 | 12/40 |
+| single-threaded | **0/40** | **4/40** |
+
+**At six runs, paired, it vanished:**
+
+| writer | recall varies | bytes vary |
+|---|---|---|
+| multi-threaded | 1/40 | 12/40 |
+| single-threaded | 1/40 | 10/40 |
+
+Same task (18) varying in both arms. 12 vs 10 bytes is noise at this n. Not
+shipped; the original comment was right and now carries the cross-process
+numbers so it is not overturned again on a small sample.
+
+## Candidate 2 — `OMP_NUM_THREADS=1`
+
+fastembed hard-codes ONNX intra-op threads to `available_parallelism()`
+(`text_embedding/impl.rs`) and `InitOptions` exposes no knob, but ORT's GEMM
+kernels still honour OpenMP, and multi-threaded float reduction is not
+bit-reproducible across processes.
+
+**At four runs it looked like a complete fix** — recall 57/57/57/57, 0/40
+varying, against 65/65/65/62 without it. It even appeared to change the
+*level*, which made it look mechanistically real rather than lucky.
+
+**Re-run on the same binary and configuration it gave 62/62/60/57, 3/40
+varying.** The four identical runs were a coincidence.
+
+## The lesson, which is the point of writing this down
+
+Both candidates produced a *clean, plausible, mechanistically-motivated* result
+at n = 3–4. Both were wrong. The per-run variance is roughly 1–3 tasks in 40,
+so four runs agreeing is unremarkable, and a run of agreement reads exactly like
+a fix.
+
+This is the same failure the project already documented twice — an unpaired
+Phase 16 A/B letting index randomness look like a reranker effect, and
+`scaleeval`'s tiny repositories inflating a distribution. **It recurred here in
+a new costume, while actively looking for it**, and it nearly landed a commit
+that overturned a correct source comment.
+
+**Minimum n for any determinism claim on this project is 6 runs per arm,
+paired.** Below that the measurement cannot distinguish a fix from a quiet
+stretch.
+
+## Where the root cause stands
+
+Unchanged and still open. Task 18 on serde varies in every configuration tried:
+multi- and single-threaded tantivy, with and without OMP pinning, and with a
+fully deterministic embedder. The floor to quote remains **7pp** on a
+serde-sized repository.
