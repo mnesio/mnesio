@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""How much do two identical runs actually differ?
+"""How much do two identical runs actually differ? **For one task only.**
+
+> **Do not use this to support a determinism claim — use
+> `measure_suite_determinism.py`.** This script takes a single task and repeats
+> it. Per-task variance is 1-3 tasks in 40, so a single task is very likely to
+> be one of the stable ones: on serde it reports `bytes_identical: true` and
+> Jaccard 1.00 while the suite around it varies by 7pp. Two claims on this
+> project ("0pp noise floor", Phase 18A "provably identical") were built on this
+> script and both had to be retracted. Kept for drilling into *one* task once
+> the suite harness has told you which task to look at.
 
 `measure_restart.py` found that two warm starts return different context for
 the same query. Byte-inequality alone does not say whether that matters: a

@@ -8,8 +8,10 @@ The phase's criterion has two halves:
 > index a large repo, restart, first query is **warm** and **provably identical**
 > to pre-restart.
 
-**Both halves are now met** (2026-08-16). The original measurement below found
-the second failing; the fix and its re-measurement are at the end.
+**The warm half is met. The identical half is NOT** — an earlier version of this
+file claimed both were, and that claim is retracted at the end of this document.
+The original measurement below found the second failing; the partial fix and its
+re-measurement follow, then the retraction.
 
 ## Warm: met
 
@@ -85,7 +87,11 @@ python3 comparison/measure_determinism.py <repo> target/release/mnesio-mcp "<tas
 
 ---
 
-# Resolved 2026-08-16 — both halves met
+# Improved 2026-08-16 — warm half met, identical half only on one small repo
+
+> **This section originally read "Resolved — both halves met". Retracted; see
+> the next section.** The numbers below are real for the repository they were
+> taken on. The conclusion drawn from them was not.
 
 Re-measured on `claw-code/rust/crates/api/src` after removing the
 approximation below `EXACT_SEARCH_MAX_SLOTS`:
@@ -147,3 +153,62 @@ Every code repository this project has measured is far under the threshold
 (178–5 690 symbols), so in practice the code path is now deterministic — but
 "in practice" is doing work in that sentence and a large prose corpus would
 land on the other side of it.
+
+
+---
+
+# Retraction 2026-08-16 — "provably identical" does not hold
+
+Phase 18A's criterion is *"index a large repo, restart, first query is warm and
+**provably identical** to pre-restart."* This file claimed both halves met. The
+second does not survive a larger repository.
+
+## What disproves it
+
+serde — 237 files, 1 977 symbols, an order of magnitude past
+`claw-code/rust/crates/api/src` — measured over 40 tasks and six fresh
+processes:
+
+| embedder | tasks whose context differs across processes |
+|---|---|
+| fastembed (production default) | 7–12 of 40 |
+| MockEmbedder (fully deterministic) | 10 of 40 |
+
+Not identical, and **not** attributable to the embedder: it persists with an
+embedder that is pure FNV-1a over the input text.
+
+## Why the original measurement missed it
+
+Two compounding sampling errors, both of which this project has now made more
+than once:
+
+1. **One repository, and the smallest one available.** Identical to the mistake
+   `noise-floor.md` made the same day, and to the one `scaleeval` caught when
+   four tiny repositories inflated a distribution.
+2. **One query, three runs.** `measure_determinism.py` takes a single task and
+   repeats it. On serde it reports `bytes_identical: true`, Jaccard 1.00 across
+   four processes — because the task it was handed is one of the ~30 stable
+   ones. Per-task variance is 1–3 in 40, so a single task is very likely to be
+   a stable one, and three runs of it prove nothing.
+
+## What is actually true
+
+- **The warm half is met and holds.** 9.6× on the first query, cold 10.6s →
+  warm 1.1s, and the warm path is itself stable. The embedding cache works.
+- **The exact-search change was a real improvement**, just not a completion —
+  it removed HNSW build randomness as a source, which is why the small repo
+  went clean.
+- **The identical half is unmet.** The residual source is in 1-hop graph
+  expansion; see `noise-floor.md` for the two candidate fixes that were tried
+  and retracted, and `pack.rs` for the `TODO(phase-18)` at the call site.
+
+**Phase 18A is ◑, not ✅.** It should not be described as complete on the
+strength of the 9.6× alone — which is what the first version of this file said
+would be wrong, before a later version did exactly that.
+
+## What the criterion needs before it can be ticked
+
+A fresh process on an unchanged repository returning byte-identical context, on
+a repository of at least serde's size, over **≥6 runs** (the minimum this
+project now requires for a determinism claim), asserted by a test rather than a
+script run by hand.
