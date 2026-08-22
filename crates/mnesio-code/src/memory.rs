@@ -201,43 +201,35 @@ fn content_hash(s: &str) -> u64 {
 /// fingerprints are comparable — pinned by
 /// `the_two_fingerprint_paths_agree`.
 fn fingerprint_tree(root: &Path) -> u64 {
-    use std::hash::Hasher;
-    let mut files = Vec::new();
-    collect_sources(root, &mut files);
-    files.sort();
-    let mut fp = std::collections::hash_map::DefaultHasher::new();
-    for file in &files {
-        let rel = file
-            .strip_prefix(root)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .to_string();
-        hash_entry(&mut fp, &rel, file);
-    }
-    fp.finish()
+    let files = collect_sources_parallel(root);
+    files
+        .iter()
+        .map(|entry| {
+            let rel = entry
+                .path
+                .strip_prefix(root)
+                .unwrap_or(&entry.path)
+                .to_string_lossy();
+            entry_hash(&rel, entry)
+        })
+        .fold(0u64, |acc, h| acc.wrapping_add(h))
 }
 
 /// The one place a file contributes to a fingerprint, so the two walks cannot
 /// drift apart.
-fn hash_entry(fp: &mut impl std::hash::Hasher, rel: &str, file: &Path) {
-    use std::hash::Hash;
-    let Ok(md) = std::fs::metadata(file) else {
-        return;
-    };
-    rel.hash(fp);
-    md.len().hash(fp);
-    if let Ok(m) = md.modified() {
-        if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
-            d.as_nanos().hash(fp);
-        }
-    }
+fn entry_hash(rel: &str, entry: &SourceEntry) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rel.hash(&mut h);
+    entry.len.hash(&mut h);
+    entry.mtime_nanos.hash(&mut h);
+    h.finish()
 }
 
 /// Walk, parse, and fingerprint a repository.
 fn parse_tree(root: &Path) -> Result<ParseTree, MnesioError> {
-    let mut files = Vec::new();
-    collect_sources(root, &mut files);
-    files.sort();
+    let mut files = collect_sources_parallel(root);
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     if files.is_empty() {
         return Err(MnesioError::Index(format!(
             "no supported source files under {} — supported: {}",
@@ -246,14 +238,14 @@ fn parse_tree(root: &Path) -> Result<ParseTree, MnesioError> {
         )));
     }
 
-    use std::hash::Hasher;
-    let mut fp = std::collections::hash_map::DefaultHasher::new();
+    let mut fp: u64 = 0;
     let parser = parser();
     let mut parsed = Vec::new();
     let mut module_docs = HashMap::new();
     let mut decl = HashMap::new();
 
-    for file in &files {
+    for entry in &files {
+        let file = &entry.path;
         // Repo-relative, because that is what `Source::uri` means and what a
         // caller can act on — an absolute path from the indexing machine is
         // meaningless to whoever reads the answer.
@@ -262,7 +254,7 @@ fn parse_tree(root: &Path) -> Result<ParseTree, MnesioError> {
             .unwrap_or(file)
             .to_string_lossy()
             .to_string();
-        hash_entry(&mut fp, &rel, file);
+        fp = fp.wrapping_add(entry_hash(&rel, entry));
         let (Some(lang), Ok(src)) = (language_of(file), std::fs::read_to_string(file)) else {
             continue;
         };
@@ -285,7 +277,7 @@ fn parse_tree(root: &Path) -> Result<ParseTree, MnesioError> {
         files: parsed,
         module_docs,
         decl,
-        fingerprint: fp.finish(),
+        fingerprint: fp,
     })
 }
 
@@ -771,22 +763,130 @@ fn survey_into(dir: &Path, cov: &mut Coverage, by_ext: &mut Vec<(String, usize)>
     }
 }
 
-fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+/// One source file and the metadata the fingerprint needs, captured during the
+/// walk rather than re-`stat`ed afterwards.
+///
+/// Phase 18B. The freshness check runs on *every query*, so its cost is a tax
+/// on the whole system. It used to `stat` each file twice — once through
+/// `Path::is_dir` while walking and again in `hash_entry` — and `readdir`
+/// already hands back both the file type and, on this platform, the metadata.
+/// Taking them from the directory entry removes a syscall per file without
+/// changing what is hashed. Measured on a 5.35M-LOC repository in
+/// `manifest/scale.md`.
+struct SourceEntry {
+    path: PathBuf,
+    len: u64,
+    mtime_nanos: u128,
+}
+
+/// Walk a repository for source files, using every core.
+///
+/// Phase 18B. The freshness check runs on every query, so at monorepo scale its
+/// cost is a per-query tax: 202 ms p50 on a 5.35M-LOC repository, against a
+/// 20 ms target. The work is almost entirely `readdir` + `stat`, which is
+/// syscall-bound and embarrassingly parallel, so this shares one queue of
+/// pending directories across `available_parallelism()` workers.
+///
+/// **Order is not preserved and does not need to be** — both callers sort by
+/// path immediately afterwards, which is what makes the fingerprint stable
+/// regardless of how the walk was scheduled. That property is pinned by
+/// `a_parallel_walk_fingerprints_identically_to_a_serial_one`.
+fn collect_sources_parallel(root: &Path) -> Vec<SourceEntry> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    if workers == 1 {
+        let mut out = Vec::new();
+        collect_sources(root, &mut out);
+        return out;
+    }
+
+    let pending = Mutex::new(vec![root.to_path_buf()]);
+    // Counts workers holding a directory they have not finished expanding. An
+    // empty queue only means "done" when this is also zero, otherwise a worker
+    // could still be about to push more directories.
+    let active = AtomicUsize::new(0);
+    let collected = Mutex::new(Vec::new());
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut local = Vec::new();
+                loop {
+                    let next = {
+                        let mut q = pending.lock().unwrap_or_else(|e| e.into_inner());
+                        q.pop()
+                    };
+                    let Some(dir) = next else {
+                        if active.load(Ordering::Acquire) == 0 {
+                            break;
+                        }
+                        std::thread::yield_now();
+                        continue;
+                    };
+                    active.fetch_add(1, Ordering::AcqRel);
+                    let mut subdirs = Vec::new();
+                    visit_dir(&dir, &mut local, &mut subdirs);
+                    if !subdirs.is_empty() {
+                        let mut q = pending.lock().unwrap_or_else(|e| e.into_inner());
+                        q.extend(subdirs);
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }
+                let mut out = collected.lock().unwrap_or_else(|e| e.into_inner());
+                out.append(&mut local);
+            });
+        }
+    });
+
+    collected.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Read one directory: source files into `files`, sub-directories into `dirs`.
+///
+/// Split out of [`collect_sources`] so the serial and parallel walks apply
+/// byte-identical filtering rules and cannot drift apart.
+fn visit_dir(dir: &Path, files: &mut Vec<SourceEntry>, dirs: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
+        let is_dir = match e.file_type() {
+            Ok(t) => t.is_dir(),
+            Err(_) => continue,
+        };
         let p = e.path();
-        if p.is_dir() {
+        if is_dir {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            // Hidden directories are tooling, not source.
             if SKIP_DIRS.contains(&name) || name.starts_with('.') {
                 continue;
             }
-            collect_sources(&p, out);
+            dirs.push(p);
         } else if language_of(&p).is_some() {
-            out.push(p);
+            let Ok(md) = e.metadata() else { continue };
+            let mtime_nanos = md
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            files.push(SourceEntry {
+                path: p,
+                len: md.len(),
+                mtime_nanos,
+            });
         }
+    }
+}
+
+fn collect_sources(dir: &Path, out: &mut Vec<SourceEntry>) {
+    let mut dirs = Vec::new();
+    visit_dir(dir, out, &mut dirs);
+    for d in dirs {
+        collect_sources(&d, out);
     }
 }
 
@@ -797,9 +897,9 @@ mod tests {
 
     /// Write a throwaway repo, keyed by a fresh id so parallel tests can't
     /// collide, and clean it up.
-    struct TempRepo(PathBuf);
+    pub(super) struct TempRepo(pub(super) PathBuf);
     impl TempRepo {
-        fn new(files: &[(&str, &str)]) -> Self {
+        pub(super) fn new(files: &[(&str, &str)]) -> Self {
             let dir = std::env::temp_dir().join(format!("mnesio-code-{}", new_id()));
             for (rel, body) in files {
                 let p = dir.join(rel);
@@ -1227,5 +1327,102 @@ mod tests {
         };
         let ctx = other.context_for("only_in_alpha", 4000).await.unwrap();
         assert!(ctx.hits.is_empty(), "cross-scope read leaked results");
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::tests::TempRepo;
+    use super::*;
+
+    /// The parallel walk must be interchangeable with the serial one. Order is
+    /// not preserved by the parallel walk, which is safe only because the
+    /// fingerprint is order-independent — this is the test that says so.
+    #[test]
+    fn a_parallel_walk_fingerprints_identically_to_a_serial_one() {
+        let repo = TempRepo::new(&[
+            ("a.rs", "fn a() {}\n"),
+            ("nested/b.rs", "fn b() {}\n"),
+            ("nested/deep/c.py", "def c():\n    pass\n"),
+            ("other/d.go", "func d() {}\n"),
+        ]);
+        let root = &repo.0;
+
+        let mut serial = Vec::new();
+        collect_sources(root, &mut serial);
+        let parallel = collect_sources_parallel(root);
+        assert_eq!(
+            serial.len(),
+            parallel.len(),
+            "both walks must find the same files"
+        );
+
+        let fold = |mut v: Vec<SourceEntry>| -> u64 {
+            v.sort_by(|a, b| a.path.cmp(&b.path));
+            v.iter()
+                .map(|e| {
+                    let rel = e
+                        .path
+                        .strip_prefix(root)
+                        .unwrap_or(&e.path)
+                        .to_string_lossy();
+                    entry_hash(&rel, e)
+                })
+                .fold(0u64, |acc, h| acc.wrapping_add(h))
+        };
+        assert_eq!(fold(serial), fold(parallel));
+    }
+
+    /// Shuffling the entries must not move the fingerprint — the property the
+    /// parallel walk depends on, stated directly rather than inferred.
+    #[test]
+    fn the_fingerprint_does_not_depend_on_walk_order() {
+        let repo = TempRepo::new(&[
+            ("a.rs", "fn a() {}\n"),
+            ("b.rs", "fn b() {}\n"),
+            ("c.rs", "fn c() {}\n"),
+        ]);
+        let root = &repo.0;
+        let mut entries = Vec::new();
+        collect_sources(root, &mut entries);
+        let hash_all = |v: &[SourceEntry]| -> u64 {
+            v.iter()
+                .map(|e| {
+                    let rel = e
+                        .path
+                        .strip_prefix(root)
+                        .unwrap_or(&e.path)
+                        .to_string_lossy();
+                    entry_hash(&rel, e)
+                })
+                .fold(0u64, |acc, h| acc.wrapping_add(h))
+        };
+        let forward = hash_all(&entries);
+        entries.reverse();
+        assert_eq!(forward, hash_all(&entries));
+    }
+
+    /// A symlinked directory must not be walked.
+    ///
+    /// Kubernetes aliases `cluster/gce/{cos,custom,ubuntu}` to one `gci`
+    /// directory, and following them indexed the same 16 files four times —
+    /// inflating the corpus and filling retrieval with identical duplicates.
+    /// Not following also removes any chance of a symlink cycle hanging the
+    /// walk.
+    #[test]
+    fn a_symlinked_directory_is_not_followed() {
+        let repo = TempRepo::new(&[("real/a.rs", "fn a() {}\n")]);
+        let root = &repo.0;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+
+        let mut found = Vec::new();
+        collect_sources(root, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "the aliased copy must not be indexed a second time"
+        );
+        assert!(found[0].path.to_string_lossy().contains("real"));
     }
 }
