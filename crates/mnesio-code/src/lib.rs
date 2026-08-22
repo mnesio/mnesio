@@ -221,6 +221,32 @@ pub struct ParsedFile {
     pub symbols: Vec<Symbol>,
     /// Edges originating in this file, targets unresolved.
     pub edges: Vec<CodeEdge>,
+    /// Names this file imports, each with a hint at the module that defines it.
+    ///
+    /// Phase 18F. The resolver's weakest case is a call whose name is defined
+    /// in several files: it has no way to choose, so it drops the edge as
+    /// [`Resolution::Ambiguous`]. An import statement is the language telling
+    /// us which one the author meant, and it is *already written in the file* —
+    /// no type inference and no language server required. Measured effect is
+    /// in `manifest/edge-resolution.md`.
+    pub imports: Vec<Import>,
+}
+
+/// One imported name, and where it is expected to live.
+///
+/// Deliberately a path *hint* rather than a resolved target: the parser cannot
+/// know how a module path maps onto the repository layout (`crate::foo` and
+/// `from pkg.foo import` and `from './foo'` all mean different things), so it
+/// records the fragment and lets [`crate::index`] test it against the paths it
+/// actually indexed. A hint that matches nothing simply leaves the edge as it
+/// was — this can add resolutions, never remove one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Import {
+    /// The bare name as written at the use site in this file, after aliasing.
+    pub name: String,
+    /// Slash-joined module path fragment, e.g. `serde/de/value`, `flask/app`.
+    /// Empty when the language names no module (a bare `import x`).
+    pub module: String,
 }
 
 #[cfg(test)]

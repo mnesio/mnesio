@@ -101,6 +101,17 @@ pub struct EdgeStats {
     /// Several symbols share the name and none is in the calling file. Dropped
     /// rather than guessed: a wrong edge actively misleads context expansion.
     pub ambiguous: usize,
+    /// The subset of `unresolved` where the name *does* exist in this
+    /// repository but the call had a receiver (`x.name()`), so it was dropped
+    /// rather than bound to a coincidental match.
+    ///
+    /// Split out because the two halves of `unresolved` have opposite
+    /// prospects: a call to a name that appears nowhere in the repo is a
+    /// standard-library or dependency call and there is nothing to bind it to,
+    /// while *this* half is exactly what type resolution would recover. Sizing
+    /// it is what tells us whether an LSP integration is worth its cost, and
+    /// the answer is in `manifest/edge-resolution.md`.
+    pub unresolved_receiver_shadowed: usize,
 }
 
 /// What an index run produced.
@@ -201,6 +212,14 @@ impl CodeIndexer {
         // Pass 3 — resolve edges into link amendments.
         let mut links: HashMap<MemoryRef, Vec<MemoryRef>> = HashMap::new();
         for file in files {
+            // Name → module hint for this file only. Imports are file-scoped,
+            // so a repo-wide map would let one file's import silently redirect
+            // another file's call.
+            let imports: HashMap<&str, &str> = file
+                .imports
+                .iter()
+                .map(|i| (i.name.as_str(), i.module.as_str()))
+                .collect();
             for edge in &file.edges {
                 // Only `Calls` today; the other kinds arrive with real grammars.
                 if edge.kind != EdgeKind::Calls {
@@ -209,7 +228,13 @@ impl CodeIndexer {
                 let Some(from) = by_key.get(&edge.from).copied() else {
                     continue;
                 };
-                match resolve(&by_name, &edge.to_name, &file.path, edge.via_receiver) {
+                match resolve(
+                    &by_name,
+                    &edge.to_name,
+                    &file.path,
+                    edge.via_receiver,
+                    &imports,
+                ) {
                     Resolution::One(to) if to != from => {
                         let entry = links.entry(from).or_default();
                         if !entry.contains(&to) {
@@ -220,7 +245,12 @@ impl CodeIndexer {
                     // A self-edge is not useful context; count it as resolved
                     // since the name *did* bind.
                     Resolution::One(_) => plan.stats.edges.resolved += 1,
-                    Resolution::None => plan.stats.edges.unresolved += 1,
+                    Resolution::None => {
+                        plan.stats.edges.unresolved += 1;
+                        if edge.via_receiver && by_name.contains_key(edge.to_name.as_str()) {
+                            plan.stats.edges.unresolved_receiver_shadowed += 1;
+                        }
+                    }
                     Resolution::Ambiguous => plan.stats.edges.ambiguous += 1,
                 }
             }
@@ -325,6 +355,7 @@ fn resolve(
     name: &str,
     from_path: &str,
     via_receiver: bool,
+    imports: &HashMap<&str, &str>,
 ) -> Resolution {
     let Some(candidates) = by_name.get(name) else {
         return Resolution::None;
@@ -335,6 +366,28 @@ fn resolve(
         .collect();
     if local.len() == 1 {
         return Resolution::One(local[0].1);
+    }
+
+    // Phase 18F — the import statement breaks the tie.
+    //
+    // When several files define `name`, the calling file has usually already
+    // said which one it means: `use crate::de::value::Error`, `from flask.app
+    // import Flask`. That is the language's own disambiguation, written by the
+    // author, needing no type inference. Applied *before* the receiver guard,
+    // because an import is strong evidence even for `x.name()` — it is why the
+    // name is in scope at all.
+    //
+    // Narrowing only: if the hint matches zero candidates or more than one,
+    // nothing changes and the pre-existing rules decide. So this can add
+    // resolutions, never replace a correct one with a guess.
+    if let Some(hint) = imports.get(name) {
+        let matched: Vec<_> = candidates
+            .iter()
+            .filter(|(path, _)| path_matches_module(path, hint))
+            .collect();
+        if matched.len() == 1 {
+            return Resolution::One(matched[0].1);
+        }
     }
     // A receiver call with no same-file definition is left unresolved rather
     // than bound to a coincidental name match in another file.
@@ -620,5 +673,169 @@ mod tests {
         };
         assert_eq!(shape(&one), shape(&two));
         assert_eq!(one.stats.edges.resolved, two.stats.edges.resolved);
+    }
+}
+
+/// Does an indexed file path plausibly contain the module an import named?
+///
+/// Phase 18F. Compares *component sequences*, not substrings: the hint
+/// `de/value` matches `serde/src/de/value.rs` but the hint `value` must match a
+/// whole path component, so it does not match `values.rs` or `de/valuer.rs`.
+/// Substring matching was the obvious implementation and is wrong for exactly
+/// the reason bare-name binding was — it manufactures confident wrong edges.
+///
+/// An empty hint (a bare `import x` naming no module) matches nothing, so it
+/// cannot resolve anything by accident.
+fn path_matches_module(path: &str, hint: &str) -> bool {
+    if hint.is_empty() {
+        return false;
+    }
+    let strip_ext = |c: &str| c.rsplit_once('.').map_or(c, |(stem, _)| stem).to_string();
+    let path_parts: Vec<String> = path
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .map(strip_ext)
+        .collect();
+    let hint_parts: Vec<String> = hint
+        .split('/')
+        .filter(|c| !c.is_empty())
+        .map(strip_ext)
+        .collect();
+    if hint_parts.is_empty() || hint_parts.len() > path_parts.len() {
+        return false;
+    }
+    path_parts
+        .windows(hint_parts.len())
+        .any(|w| w == hint_parts.as_slice())
+}
+
+#[cfg(test)]
+mod import_resolution_tests {
+    use super::*;
+    use crate::{CodeParser, HeuristicParser};
+
+    fn rs(path: &str, src: &str) -> ParsedFile {
+        HeuristicParser.parse(path, "rust", src).unwrap()
+    }
+
+    fn plan(files: &[ParsedFile]) -> IndexPlan {
+        CodeIndexer::new(Scope::global("repo")).plan(files)
+    }
+
+    /// The case Phase 18F exists for: two files define `helper`, so the old
+    /// resolver dropped the edge as ambiguous. The import says which one.
+    #[test]
+    fn an_import_disambiguates_a_duplicated_name() {
+        let files = vec![
+            rs("src/alpha.rs", "pub fn helper() {}\n"),
+            rs("src/beta.rs", "pub fn helper() {}\n"),
+            rs(
+                "src/caller.rs",
+                "use crate::beta::helper;\nfn go() {\n    helper();\n}\n",
+            ),
+        ];
+        let p = plan(&files);
+        assert_eq!(p.stats.edges.resolved, 1, "the import should bind the call");
+        assert_eq!(p.stats.edges.ambiguous, 0);
+
+        let beta = files[1].symbols[0].key();
+        let target = p.events.iter().find_map(|e| match e {
+            Event::MemoryLinksUpdated { links, .. } => Some(links.clone()),
+            _ => None,
+        });
+        let want = p.events.iter().find_map(|e| match e {
+            Event::MemoryWritten(m) if m.tags.iter().any(|t| t == "src/beta.rs") => {
+                Some(MemoryRef(m.id))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            target.unwrap(),
+            vec![want.unwrap()],
+            "bound to beta, {beta}"
+        );
+    }
+
+    /// Without the import the edge must stay ambiguous. This is the control:
+    /// it proves the resolution above came from the import and not from some
+    /// incidental ordering that would have picked a file anyway.
+    #[test]
+    fn the_same_call_without_an_import_stays_ambiguous() {
+        let files = vec![
+            rs("src/alpha.rs", "pub fn helper() {}\n"),
+            rs("src/beta.rs", "pub fn helper() {}\n"),
+            rs("src/caller.rs", "fn go() {\n    helper();\n}\n"),
+        ];
+        let p = plan(&files);
+        assert_eq!(p.stats.edges.ambiguous, 1);
+        assert_eq!(p.stats.edges.resolved, 0);
+    }
+
+    /// An import naming a module that was never indexed must change nothing —
+    /// the hint narrows or it is ignored, it never guesses.
+    #[test]
+    fn an_import_pointing_nowhere_leaves_the_edge_alone() {
+        let files = vec![
+            rs("src/alpha.rs", "pub fn helper() {}\n"),
+            rs("src/beta.rs", "pub fn helper() {}\n"),
+            rs(
+                "src/caller.rs",
+                "use third_party::vendored::helper;\nfn go() {\n    helper();\n}\n",
+            ),
+        ];
+        let p = plan(&files);
+        assert_eq!(p.stats.edges.ambiguous, 1, "unmatched hint must not bind");
+        assert_eq!(p.stats.edges.resolved, 0);
+    }
+
+    /// One file's import must not redirect another file's call.
+    #[test]
+    fn imports_are_scoped_to_the_file_that_wrote_them() {
+        let files = vec![
+            rs("src/alpha.rs", "pub fn helper() {}\n"),
+            rs("src/beta.rs", "pub fn helper() {}\n"),
+            rs(
+                "src/importer.rs",
+                "use crate::beta::helper;\nfn a() {\n    helper();\n}\n",
+            ),
+            rs("src/other.rs", "fn b() {\n    helper();\n}\n"),
+        ];
+        let p = plan(&files);
+        assert_eq!(p.stats.edges.resolved, 1, "only the importing file binds");
+        assert_eq!(p.stats.edges.ambiguous, 1, "the other file stays ambiguous");
+    }
+
+    /// A same-file definition still wins: it is stronger evidence than an
+    /// import, and reversing that order would regress the common case.
+    #[test]
+    fn a_local_definition_still_beats_an_import() {
+        let files = vec![
+            rs("src/beta.rs", "pub fn helper() {}\n"),
+            rs(
+                "src/caller.rs",
+                "use crate::beta::helper;\nfn helper() {}\nfn go() {\n    helper();\n}\n",
+            ),
+        ];
+        let p = plan(&files);
+        assert_eq!(p.stats.edges.resolved, 1);
+        let local = files[1]
+            .symbols
+            .iter()
+            .find(|s| s.name == "helper")
+            .map(|s| s.key());
+        assert!(local.is_some(), "the local definition should be indexed");
+    }
+
+    #[test]
+    fn module_hints_match_whole_components_not_substrings() {
+        assert!(path_matches_module("serde/src/de/value.rs", "de/value"));
+        assert!(path_matches_module("src/flask/app.py", "flask/app"));
+        assert!(path_matches_module("src/util/date.ts", "util/date"));
+        // A hint must not match a longer component that merely starts the same.
+        assert!(!path_matches_module("src/de/valuer.rs", "de/value"));
+        assert!(!path_matches_module("src/values.rs", "value"));
+        // Order matters, and an empty hint binds nothing.
+        assert!(!path_matches_module("src/value/de.rs", "de/value"));
+        assert!(!path_matches_module("src/anything.rs", ""));
     }
 }

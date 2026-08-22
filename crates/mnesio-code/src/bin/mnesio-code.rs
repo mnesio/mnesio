@@ -237,6 +237,33 @@ async fn run() -> Result<(), String> {
             "{:.0}% of call sites resolved — the map is a lower bound on the real call graph",
             r * 100.0
         );
+        // The split, not just the rate. A single percentage cannot say whether
+        // the missing edges are *addressable*: `ambiguous` means several
+        // candidates and no way to choose (a ranking problem we can attack),
+        // while `unresolved` usually means a call into the standard library or
+        // a dependency that was never indexed (nothing to bind to). Phase 18F
+        // was aimed at the ambiguous bucket on the assumption it was large.
+        let e = &stats.edges;
+        let total = e.resolved + e.unresolved + e.ambiguous;
+        if total > 0 {
+            let pct = |n: usize| 100.0 * n as f32 / total as f32;
+            eprintln!(
+                "  resolved {} ({:.0}%) · unresolved {} ({:.0}%) · ambiguous {} ({:.0}%)",
+                e.resolved,
+                pct(e.resolved),
+                e.unresolved,
+                pct(e.unresolved),
+                e.ambiguous,
+                pct(e.ambiguous),
+            );
+            eprintln!(
+                "  of the unresolved, {} ({:.0}% of all calls) name a symbol that \
+                 does exist here but was dropped by the receiver guard — the only \
+                 slice type resolution could recover",
+                e.unresolved_receiver_shadowed,
+                pct(e.unresolved_receiver_shadowed),
+            );
+        }
     }
     if journal.entries.is_empty() {
         eprintln!(

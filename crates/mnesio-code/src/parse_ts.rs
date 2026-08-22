@@ -476,6 +476,9 @@ impl CodeParser for TreeSitterParser {
             module_doc: crate::parse::module_doc_for(language, source),
             symbols,
             edges,
+            // Shared with the heuristic parser on purpose: import syntax is
+            // line-oriented, so a grammar adds nothing here.
+            imports: crate::parse::extract_imports(language, source),
         })
     }
 }

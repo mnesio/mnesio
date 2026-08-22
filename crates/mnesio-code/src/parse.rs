@@ -32,7 +32,7 @@
 //!   top-of-file `/** … */` becomes a [`SymbolKind::Module`] symbol, so
 //!   module-level prose has an owner in the index instead of being dropped.
 
-use crate::{CodeEdge, EdgeKind, ParsedFile, Symbol, SymbolKind};
+use crate::{CodeEdge, EdgeKind, Import, ParsedFile, Symbol, SymbolKind};
 
 /// Why parsing failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +177,7 @@ impl CodeParser for HeuristicParser {
             module_doc: module_doc(&lines, language),
             symbols,
             edges,
+            imports: extract_imports(language, source),
         })
     }
 }
@@ -412,6 +413,7 @@ fn parse_indented(path: &str, language: &str, source: &str) -> ParsedFile {
         module_doc: module_doc(&lines, language),
         symbols,
         edges,
+        imports: extract_imports(language, source),
     }
 }
 
@@ -936,5 +938,320 @@ pub trait EventLog {
         let names: Vec<_> = f.symbols.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["outer"]);
         assert!(f.symbols[0].text.contains("fn inner"));
+    }
+}
+
+/// Extract imported names and their module hints from one file's source.
+///
+/// Phase 18F. Shared by both parsers because import syntax is line-oriented in
+/// every language here, so a grammar buys nothing: `use a::b::C;` and
+/// `from a.b import C` are as unambiguous to a line scanner as to a parse tree.
+///
+/// The output feeds [`crate::index`]'s ambiguity tie-break only. It is a hint,
+/// never an assertion — a wrong hint matches no indexed path and changes
+/// nothing, which is why this can be heuristic without risking bad edges.
+pub fn extract_imports(language: &str, source: &str) -> Vec<Import> {
+    let mut out = Vec::new();
+    for raw in source.lines() {
+        let line = raw.trim();
+        match language {
+            "rust" => rust_import(line, &mut out),
+            "python" => python_import(line, &mut out),
+            "javascript" | "typescript" | "tsx" | "jsx" => js_import(line, &mut out),
+            "go" => go_import(line, &mut out),
+            _ => {}
+        }
+        // Imports are conventionally at the top, but Rust `use` inside a
+        // function and Python imports inside a method are both legal and
+        // common, so the whole file is scanned rather than a prefix.
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name).then(a.module.cmp(&b.module)));
+    out.dedup();
+    out
+}
+
+/// `use a::b::C;` · `use a::b::{C, D};` · `pub use a::B as C;`
+fn rust_import(line: &str, out: &mut Vec<Import>) {
+    let rest = line
+        .strip_prefix("pub use ")
+        .or_else(|| line.strip_prefix("use "))
+        .map(str::trim);
+    let Some(rest) = rest else { return };
+    let rest = rest.trim_end_matches(';').trim();
+
+    // `a::b::{C, D}` — one module, several names.
+    if let Some(open) = rest.find('{') {
+        let prefix = rest[..open].trim().trim_end_matches("::");
+        let Some(close) = rest.rfind('}') else { return };
+        for item in rest[open + 1..close].split(',') {
+            let item = item.trim();
+            // Nested groups (`a::{b::{C}}`) are rare and not worth a parser;
+            // the outer name still lands via the prefix path below.
+            if item.is_empty() || item.contains('{') || item == "self" {
+                continue;
+            }
+            if let Some(name) = rust_leaf(item) {
+                out.push(Import {
+                    name,
+                    module: rust_module(prefix),
+                });
+            }
+        }
+        return;
+    }
+
+    let segments: Vec<&str> = rest.split("::").map(str::trim).collect();
+    if segments.len() < 2 {
+        return;
+    }
+    let Some(name) = rust_leaf(segments[segments.len() - 1]) else {
+        return;
+    };
+    out.push(Import {
+        name,
+        module: rust_module(&segments[..segments.len() - 1].join("::")),
+    });
+}
+
+/// The bound name of one `use` item, honouring `as` aliases. `*` binds nothing.
+fn rust_leaf(item: &str) -> Option<String> {
+    let name = match item.split_once(" as ") {
+        Some((_, alias)) => alias.trim(),
+        None => item.trim(),
+    };
+    if name.is_empty() || name == "*" || name == "self" {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// `crate::a::b` → `a/b`. The crate-relative prefixes say nothing about which
+/// file a symbol is in, so they are dropped rather than matched literally.
+fn rust_module(path: &str) -> String {
+    path.split("::")
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !matches!(*s, "crate" | "self" | "super"))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `from a.b import C, D` · `import a.b` · `import a.b as c`
+fn python_import(line: &str, out: &mut Vec<Import>) {
+    if let Some(rest) = line.strip_prefix("from ") {
+        let Some((module, names)) = rest.split_once(" import ") else {
+            return;
+        };
+        // `from . import x` / `from .mod import x` — leading dots are relative
+        // markers, not path components.
+        let module = module.trim().trim_start_matches('.').replace('.', "/");
+        for item in names
+            .trim()
+            .trim_matches(|c| c == '(' || c == ')')
+            .split(',')
+        {
+            let item = item.trim();
+            if item.is_empty() || item == "*" {
+                continue;
+            }
+            let name = match item.split_once(" as ") {
+                Some((_, alias)) => alias.trim(),
+                None => item,
+            };
+            out.push(Import {
+                name: name.to_string(),
+                module: module.clone(),
+            });
+        }
+        return;
+    }
+    if let Some(rest) = line.strip_prefix("import ") {
+        for item in rest.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let (path, alias) = match item.split_once(" as ") {
+                Some((p, a)) => (p.trim(), Some(a.trim())),
+                None => (item, None),
+            };
+            let module = path.replace('.', "/");
+            let name = alias
+                .map(str::to_string)
+                .or_else(|| path.rsplit('.').next().map(str::to_string));
+            if let Some(name) = name {
+                out.push(Import { name, module });
+            }
+        }
+    }
+}
+
+/// `import { a, b } from './x'` · `import a from './x'` · `require('./x')`
+fn js_import(line: &str, out: &mut Vec<Import>) {
+    let module = js_module(line);
+    let Some(module) = module else { return };
+
+    if let Some(open) = line.find('{') {
+        if let Some(close) = line[open..].find('}') {
+            for item in line[open + 1..open + close].split(',') {
+                let item = item.trim();
+                if item.is_empty() {
+                    continue;
+                }
+                let name = match item.split_once(" as ") {
+                    Some((_, alias)) => alias.trim(),
+                    None => item,
+                };
+                out.push(Import {
+                    name: name.to_string(),
+                    module: module.clone(),
+                });
+            }
+            return;
+        }
+    }
+    // Default or namespace import: `import a from 'x'`, `import * as a from 'x'`.
+    if let Some(rest) = line.strip_prefix("import ") {
+        let head = rest.split(" from ").next().unwrap_or("").trim();
+        let name = head.rsplit(" as ").next().unwrap_or(head).trim();
+        if !name.is_empty() && name != "*" && !name.contains(['{', '\'', '"']) {
+            out.push(Import {
+                name: name.to_string(),
+                module,
+            });
+        }
+    }
+}
+
+/// The quoted specifier of an import/require line, normalised to a path hint.
+fn js_module(line: &str) -> Option<String> {
+    if !(line.starts_with("import ") || line.contains("require(")) {
+        return None;
+    }
+    let start = line.find(['\'', '"'])?;
+    let quote = line.as_bytes()[start] as char;
+    let end = line[start + 1..].find(quote)? + start + 1;
+    let spec = &line[start + 1..end];
+    // `./x`, `../x` — relative markers carry no path information we can match.
+    let spec = spec.trim_start_matches("./").replace("../", "");
+    let spec = spec.trim_end_matches(".js").trim_end_matches(".ts");
+    Some(spec.to_string())
+}
+
+/// `import "path/to/pkg"` — Go binds the last component as the package name.
+fn go_import(line: &str, out: &mut Vec<Import>) {
+    let quoted = line.trim().trim_start_matches("import ").trim();
+    let quoted = quoted.trim_matches('"');
+    if quoted.is_empty() || quoted.contains(' ') || !quoted.contains('/') {
+        return;
+    }
+    if let Some(name) = quoted.rsplit('/').next() {
+        out.push(Import {
+            name: name.to_string(),
+            module: quoted.to_string(),
+        });
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn names(language: &str, src: &str) -> Vec<(String, String)> {
+        extract_imports(language, src)
+            .into_iter()
+            .map(|i| (i.name, i.module))
+            .collect()
+    }
+
+    #[test]
+    fn rust_use_binds_leaf_to_its_module() {
+        let got = names("rust", "use crate::de::value::Error;\n");
+        assert_eq!(got, vec![("Error".into(), "de/value".into())]);
+    }
+
+    #[test]
+    fn rust_brace_group_binds_every_name_to_one_module() {
+        let mut got = names("rust", "use serde::de::{Visitor, MapAccess};\n");
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("MapAccess".into(), "serde/de".into()),
+                ("Visitor".into(), "serde/de".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_alias_binds_the_alias_not_the_original() {
+        let got = names("rust", "use std::io::Error as IoError;\n");
+        assert_eq!(got, vec![("IoError".into(), "std/io".into())]);
+    }
+
+    #[test]
+    fn rust_glob_and_self_bind_nothing() {
+        assert!(names("rust", "use foo::*;\nuse foo::self;\n").is_empty());
+    }
+
+    #[test]
+    fn python_from_import_binds_each_name() {
+        let mut got = names("python", "from flask.app import Flask, Request\n");
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("Flask".into(), "flask/app".into()),
+                ("Request".into(), "flask/app".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_relative_import_drops_the_dots() {
+        let got = names("python", "from .globals import request\n");
+        assert_eq!(got, vec![("request".into(), "globals".into())]);
+    }
+
+    #[test]
+    fn python_plain_import_binds_the_last_component() {
+        let got = names("python", "import os.path\n");
+        assert_eq!(got, vec![("path".into(), "os/path".into())]);
+    }
+
+    #[test]
+    fn js_named_import_binds_each_specifier() {
+        let mut got = names(
+            "typescript",
+            "import { parse, format } from './util/date';\n",
+        );
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("format".into(), "util/date".into()),
+                ("parse".into(), "util/date".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn js_default_import_binds_the_local_name() {
+        let got = names("javascript", "import express from './express';\n");
+        assert_eq!(got, vec![("express".into(), "express".into())]);
+    }
+
+    #[test]
+    fn a_file_with_no_imports_yields_none() {
+        assert!(names("rust", "fn main() {}\n").is_empty());
+        assert!(names("python", "def main():\n    pass\n").is_empty());
+    }
+
+    #[test]
+    fn parsing_a_file_attaches_its_imports() {
+        let f = HeuristicParser
+            .parse("src/a.rs", "rust", "use crate::b::Thing;\nfn go() {}\n")
+            .unwrap();
+        assert_eq!(f.imports.len(), 1);
+        assert_eq!(f.imports[0].name, "Thing");
     }
 }
