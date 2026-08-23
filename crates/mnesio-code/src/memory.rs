@@ -428,9 +428,13 @@ impl CodeMemory {
         //
         // Phase 18B. This used to call `embed(slice::from_ref(&m.content))`
         // inside the loop below, so a repository paid one model invocation per
-        // symbol: 73,567 of them on Kubernetes, and the dominant term in an
-        // 8.5-hour index. Every embedder here takes a slice and batches
-        // internally, so the per-call overhead was pure waste.
+        // symbol — 73,567 of them on Kubernetes.
+        //
+        // **Batching is worth 1.24×, not an order of magnitude**, measured cold
+        // on serde over 6 paired runs. Per-call overhead was never the dominant
+        // term, and the first version of this comment claimed it was. Naive
+        // batching is in fact *6.4× slower* than no batching at all; see the
+        // sort below for why.
         //
         // Deduplicated by content hash before embedding, because a real
         // codebase repeats itself — identical `Default` impls, generated

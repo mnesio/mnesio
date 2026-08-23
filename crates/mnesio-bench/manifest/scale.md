@@ -13,17 +13,28 @@ not is the more important.**
 |---|---|
 | files indexed | 13,420 |
 | symbols indexed | 73,567 |
-| **cold index** | **30,577 s — 8.5 hours** |
+| **cold index** | **2,263 s — 37.7 minutes** (30.8 ms/symbol) |
 | warm query (index resident) | 0.08 s |
 | event store on disk | 33.6 MB |
 
-**8.5 hours is not a credible scale story**, and it should be quoted exactly
-that way. codebase-memory-mcp publishes 28M LOC / 75k files in 3 minutes. We
-now have a number for a monorepo where before we had none, and the number is
-bad.
+**An earlier version of this file reported 8.5 hours. That number was wrong by
+13.5×** — it was measured while the same machine ran a greedy-ablation pass and
+repeated `cargo build`s for the whole eight hours. Re-run on an idle machine,
+the same repository indexes in **37.7 minutes**.
 
-The two good numbers are real: once resident, a query answers in **80 ms** at
-this scale, and the whole event log for 73,567 symbols is **34 MB**.
+The mistake is worth naming precisely, because it is not one of the failure
+modes this project had a rule for. It was not an unpaired A/B, or a corpus too
+small, or an underpowered sample. It was a **single long-running measurement
+sharing a machine with the work that produced it**, and nothing in the existing
+discipline would have caught it.
+
+37.7 minutes is a usable number and still not a good one: codebase-memory-mcp
+publishes 28M LOC / 75k files in 3 minutes. But it is the difference between
+"unusable at monorepo scale" and "slow at monorepo scale", and the earlier
+version of this document asserted the former on contaminated evidence.
+
+The two good numbers are unchanged: once resident, a query answers in **80 ms**
+at this scale, and the whole event log for 73,567 symbols is **34 MB**.
 
 *Symbol counts differ by build.* The `tree-sitter` build sees 30 languages and
 finds 134,639 symbols across 13,710 files; the default `mnesio-mcp` build
@@ -70,30 +81,45 @@ The arms do not overlap: batched max 36.8 s is below unbatched min 39.7 s.
 **1.24× is a real win and a much smaller one than "73,567 calls became 288"
 suggests.** Per-call overhead was never the dominant term.
 
-## Where the 8.5 hours actually goes — and a caveat on that number
+## Where the time goes
 
-Timed separately on the same checkout: **parse + plan + graph is 112 seconds**
-(`mnesio-code`, no embedding). So essentially none of the 8.5 hours is parsing,
-symbol extraction, edge resolution or community detection. It is all embedding
-plus vector insertion.
+**Parse + plan + graph is 112 seconds** on the same checkout (`mnesio-code`, no
+embedding). So essentially none of the cold index is parsing, symbol
+extraction, edge resolution or community detection — it is all embedding plus
+vector insertion.
 
-That leaves an unexplained gap. serde costs **20 ms/symbol** end to end;
-Kubernetes cost **416 ms/symbol** — 20× worse per symbol, for work that is
-per-symbol independent. Embedding one function does not get slower because
-other functions exist.
+### Per-symbol cost is flat across the corpus, and higher on Kubernetes
 
-**Two candidates, and the first is a defect in the measurement rather than the
-system.** The Kubernetes run shared the machine with a greedy-ablation pass and
-several `cargo build`s for its whole duration, so it was never a clean
-measurement — **8.5 hours is an upper bound taken under load, not a clean
-number**, and it is corrected here rather than left standing as though it were.
-The second candidate is HNSW insertion cost growing with graph size: serde has
-2,015 vectors and Kubernetes 73,567, which is the one thing in that path that
-does depend on corpus size.
+Cold index over the pinned corpus, one repository per row, idle machine:
 
-Distinguishing them needs a re-run on an idle machine. Until then the honest
-statement is that a 5.35M-LOC repository indexes in **hours, not minutes**, and
-that the headline figure is contaminated.
+| repo | symbols | cold | ms/symbol |
+|---|---|---|---|
+| fd | 372 | 9.6 s | 25.8 |
+| bytes | 803 | 12.5 s | 15.6 |
+| requests | 807 | 14.9 s | 18.5 |
+| httpx | 1,241 | 25.4 s | 20.5 |
+| flask | 1,655 | 25.2 s | 15.2 |
+| click | 1,932 | 32.5 s | 16.8 |
+| serde | 2,015 | 31.5 s | 15.7 |
+| ripgrep | 3,103 | 62.1 s | 20.0 |
+| zod | 6,445 | 57.2 s | 8.9 |
+| **kubernetes** | **73,567** | **2,263 s** | **30.8** |
+
+Between 372 and 6,445 symbols the per-symbol cost is **flat or falling** — zod,
+the largest, is the cheapest at 8.9 ms. So there is no superlinear blow-up in
+that range, which is what ruled out the first hypothesis (HNSW insertion cost
+growing with graph size) for small repositories.
+
+Kubernetes costs **30.8 ms/symbol**, roughly 2× the corpus median. That is a
+real gap and a modest one — not the 20× the contaminated run implied. It is
+consistent with HNSW insertion becoming more expensive past 50,000 vectors, but
+2× on one data point is not enough to claim that, and it is recorded as an open
+question rather than an explanation.
+
+**A projection from the ladder would have said ~20 minutes; the answer was
+37.7.** Extrapolating flat per-symbol cost from a 6,445-symbol repository to a
+73,567-symbol one was wrong by nearly 2×, which is its own small lesson about
+extrapolating past the measured range.
 
 ## Freshness check — the per-query tax
 
@@ -138,8 +164,8 @@ fingerprint does not depend on walk order.
 | a >1M-LOC repo indexes with published numbers | **met** — 5.35M LOC, numbers above |
 | freshness check <20 ms p50 at that size | **not met** — 61.6 ms, floor-bound |
 
-Phase 18B stays **◑**. The scale claim now exists and is unflattering, which is
-the point of measuring it.
+Phase 18B stays **◑** on the freshness half. The scale claim now exists, is
+measured on an idle machine, and is unflattering without being wrong.
 
 ## Reproducing
 
@@ -148,3 +174,9 @@ git clone --depth 1 https://github.com/kubernetes/kubernetes ~/mnesio-scale-k8s
 cargo run --release -p mnesio-code --features tree-sitter \
   --example freshness_bench -- ~/mnesio-scale-k8s 15
 ```
+
+**Run it on an idle machine.** That is not boilerplate: the first version of
+this document reported 8.5 hours because the measurement shared a laptop with
+the work that produced it, and the number was 13.5× too high. A wall-clock
+benchmark has no way to tell you it was starved of CPU — it just returns a
+larger number, which looks exactly like a slower system.
