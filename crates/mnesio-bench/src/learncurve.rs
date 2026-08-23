@@ -402,6 +402,92 @@ pub fn format_curve(r: &CurveReport) -> String {
     out
 }
 
+/// Compile a contribution pass into gated retrieval rules, and measure what
+/// they do to held-out recall.
+///
+/// **This is the link the wedge was missing.** Every observational route to
+/// per-symbol credit has been measured and failed: suppression found nothing
+/// harmful, promotion by success rate selected the commonest words, lift did
+/// not bind, and significance correctly refused almost everything. All four
+/// failed for the same reason — an outcome is one bit shared across the ~20
+/// symbols in a context, so no statistic over that data can say which symbol
+/// mattered.
+///
+/// Counterfactual masking does not have that problem: it varies one symbol
+/// while holding the rest of the context fixed, which is the definition of the
+/// question. So the rules here are proposed from *measured contribution*
+/// rather than from correlation.
+///
+/// What does **not** change is the gate. A causal proposal is still evaluated
+/// against the canary set and still refused on any regression (Hard Rule #1).
+/// Contribution was measured on the training split; the canaries and the
+/// held-out set are untouched by it, so this is a real out-of-sample test.
+pub async fn causal_curve(
+    index: &impl CurveIndex,
+    suite: &[CodeQuery],
+    contributions: &[(MemoryRef, f32)],
+    epsilon: f32,
+) -> Result<CurveReport> {
+    let s = split(suite);
+    if s.held_out.is_empty() || s.canary.is_empty() {
+        anyhow::bail!(
+            "suite of {} is too small to split into train/canary/held-out",
+            suite.len()
+        );
+    }
+
+    let mut report = CurveReport {
+        train: s.train.len(),
+        canary: s.canary.len(),
+        held_out: s.held_out.len(),
+        ..Default::default()
+    };
+
+    // Harmful = removing it *raised* recall. This is the honest target for a
+    // suppression rule, and the one the correlational learner could never
+    // find: at 88% baseline no symbol sits in contexts that fail four times in
+    // five, so nothing ever looked bad enough to remove.
+    let mut harmful: Vec<(MemoryRef, f32)> = contributions
+        .iter()
+        .filter(|(_, c)| *c < -epsilon)
+        .copied()
+        .collect();
+    // Most harmful first, so the gate sees the strongest claim while the
+    // policy is still empty and cheap to reason about.
+    harmful.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0 .0.cmp(&b.0 .0)));
+    report.proposals = harmful.len();
+
+    let none = Policy::default();
+    let canary_before = measure(index, &s.canary, &none).await?;
+    report.baseline = measure(index, &s.held_out, &none).await?;
+
+    let mut committed = Policy::default();
+    for (m, contribution) in &harmful {
+        // Cumulative, exactly as the observational path gates: two individually
+        // harmless suppressions can together strip a query's only answer.
+        let mut candidate = committed.clone();
+        candidate.suppressed.insert(*m);
+
+        let after = measure(index, &s.canary, &candidate).await?;
+        let committed_now = after >= canary_before;
+        if committed_now {
+            committed = candidate;
+        }
+        report.decisions.push(GateDecision {
+            rationale: format!(
+                "masking {} raised training recall by {:.3} — suppress it",
+                m.0, -contribution
+            ),
+            committed: committed_now,
+            canary_before,
+            canary_after: after,
+        });
+    }
+
+    report.learned = measure(index, &s.held_out, &committed).await?;
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +542,93 @@ mod tests {
             crowded: false,
         };
         assert!(run_curve(&idx, &s, LearnConfig::default()).await.is_err());
+    }
+
+    /// A causal suppression that helps must reach held-out through the gate.
+    #[tokio::test]
+    async fn a_measured_harmful_symbol_is_suppressed_and_lifts_held_out() {
+        let noise = MemoryRef(new_id());
+        let idx = Poisoned {
+            noise,
+            good: MemoryRef(new_id()),
+            crowded: true,
+        };
+        let s = suite(50);
+        // Contribution as masking would measure it: removing `noise` raises
+        // recall, so its contribution is negative.
+        let contributions = vec![(noise, -0.5f32)];
+        let r = causal_curve(&idx, &s, &contributions, 0.02).await.unwrap();
+
+        assert_eq!(r.proposals, 1, "the harmful symbol should be proposed");
+        assert!(r.decisions[0].committed, "the gate should accept it");
+        assert!(
+            r.learned > r.baseline,
+            "held-out should improve: {:.2} -> {:.2}",
+            r.baseline,
+            r.learned
+        );
+    }
+
+    /// The other half of Hard Rule #1, and the more important one: a
+    /// suppression that *breaks* canaries is refused even though masking
+    /// measured it as harmful. Causal evidence does not buy a bypass.
+    #[tokio::test]
+    async fn a_canary_breaking_suppression_is_refused_despite_causal_evidence() {
+        /// An index where one symbol *is* the answer: suppress it and every
+        /// query fails. `Poisoned` cannot express this — with `crowded: false`
+        /// it reports a hit regardless of policy — and reusing it would have
+        /// made this test pass without exercising the gate at all.
+        struct Essential(MemoryRef);
+        impl CurveIndex for Essential {
+            async fn run(&self, _q: &CodeQuery, policy: &Policy) -> Result<Scored> {
+                let present = !policy.suppressed.contains(&self.0);
+                Ok(Scored {
+                    hit: present,
+                    symbols: if present { vec![self.0] } else { vec![] },
+                })
+            }
+        }
+
+        let good = MemoryRef(new_id());
+        let idx = Essential(good);
+        let s = suite(50);
+        // Claim the *load-bearing* symbol is harmful. Suppressing it strips
+        // every answer, so canaries collapse and the gate must refuse.
+        let contributions = vec![(good, -0.9f32)];
+        let r = causal_curve(&idx, &s, &contributions, 0.02).await.unwrap();
+
+        assert_eq!(r.proposals, 1);
+        assert!(
+            !r.decisions[0].committed,
+            "a canary regression must refuse the rule"
+        );
+        assert!(
+            r.decisions[0].canary_after < r.decisions[0].canary_before,
+            "the refusal should be because canaries dropped"
+        );
+        assert_eq!(
+            r.learned, r.baseline,
+            "a refused rule must leave held-out untouched"
+        );
+    }
+
+    /// Symbols whose measured contribution is within epsilon are not rules.
+    #[tokio::test]
+    async fn inert_symbols_produce_no_proposals() {
+        let idx = Poisoned {
+            noise: MemoryRef(new_id()),
+            good: MemoryRef(new_id()),
+            crowded: false,
+        };
+        let s = suite(50);
+        let contributions = vec![
+            (MemoryRef(new_id()), 0.0f32),
+            (MemoryRef(new_id()), -0.001f32),
+            (MemoryRef(new_id()), 0.4f32),
+        ];
+        let r = causal_curve(&idx, &s, &contributions, 0.02).await.unwrap();
+        assert_eq!(r.proposals, 0);
+        assert_eq!(r.learned, r.baseline);
     }
 
     #[tokio::test]

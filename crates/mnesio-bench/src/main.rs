@@ -1846,8 +1846,26 @@ async fn cmd_learncurve(opts: LearnCurveOpts) -> Result<()> {
                 s.train.len(),
                 (seen.len().min(cfg.max_candidates) + 1) * s.train.len()
             );
-            let c = run_code_causal(&index, s.train.clone(), &seen, cfg).await?;
+            let c = run_code_causal(&index, s.train.clone(), &seen, cfg.clone()).await?;
             println!("\n{}", format_contribution(&c));
+
+            // Compile the contributions into gated rules and measure held-out.
+            // Printing a contribution table and stopping there is what the
+            // previous version did, and it left the wedge's central claim
+            // untested: the point is not that contribution is measurable, it
+            // is whether acting on it improves retrieval on tasks the
+            // measurement never saw.
+            let contributions: Vec<_> = c
+                .report
+                .scored
+                .iter()
+                .map(|x| (x.memory, x.contribution))
+                .collect();
+            let causal =
+                mnesio_bench::learncurve::causal_curve(&index, &suite, &contributions, cfg.epsilon)
+                    .await?;
+            println!("\n## acting on it — causal rules through the same gate\n");
+            println!("{}", format_curve(&causal));
         }
     }
 
