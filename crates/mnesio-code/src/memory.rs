@@ -441,7 +441,17 @@ impl CodeMemory {
                         event: Event::MemoryWritten(m),
                     };
                     vector.apply(&entry).await?;
-                    bm25.apply(&entry).await?;
+                    // Stage, do not `apply`. `MaterializedView::apply` commits
+                    // each entry so a live write is searchable immediately —
+                    // the right contract there, and quadratic here. Every
+                    // tantivy commit runs `prepare_commit`, `save metas` and a
+                    // garbage collection, so a bulk build paid that per symbol:
+                    // 1,172 commits in the first 72 s of a Kubernetes index,
+                    // which projects to ~34,000 commits and ~35 minutes of pure
+                    // overhead for 134,639 symbols. This is a rebuild, so it
+                    // takes the rebuild contract — stage everything, commit
+                    // once below.
+                    bm25.stage(&entry)?;
                 }
                 Event::MemoryLinksUpdated { id, links: l } => {
                     links.insert(*id, l.clone());
@@ -449,6 +459,10 @@ impl CodeMemory {
                 _ => {}
             }
         }
+
+        // One commit for the whole rebuild. Until this point nothing staged is
+        // searchable, which is correct: a half-built index must never answer.
+        bm25.commit()?;
 
         // Drop vectors for code that no longer exists, or the cache grows
         // without bound across a long editing session.

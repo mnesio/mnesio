@@ -1694,6 +1694,18 @@ struct LearnCurveOpts {
     /// only measurement here that is *causal* rather than correlational, and
     /// it costs accordingly.
     causal: bool,
+    /// `loo` (default) or `greedy`.
+    ///
+    /// Leave-one-out is degenerate on this suite: a commit usually touches
+    /// several symbols, so masking one still leaves another gold symbol in
+    /// context and the measured contribution is ~0. Greedy ablation removes
+    /// the least-valuable symbol repeatedly, so the second member of a
+    /// redundant set becomes load-bearing once the first is gone. It costs
+    /// O(n²) evals, hence the separate, smaller candidate bound.
+    causal_mode: String,
+    /// Candidate cap for the causal pass. Defaults to 300 for `loo`, and to a
+    /// much smaller number for `greedy` because the cost is quadratic.
+    causal_candidates: Option<usize>,
 }
 
 fn parse_learncurve(
@@ -1706,6 +1718,8 @@ fn parse_learncurve(
         queries: 200,
         repeat: 1,
         causal: false,
+        causal_mode: "loo".into(),
+        causal_candidates: None,
     };
     while let Some(a) = iter.next() {
         match a.as_str() {
@@ -1715,6 +1729,16 @@ fn parse_learncurve(
             "--queries" => o.queries = next_value(&mut iter, "--queries")?.parse()?,
             "--repeat" => o.repeat = next_value(&mut iter, "--repeat")?.parse()?,
             "--causal" => o.causal = true,
+            "--causal-mode" => {
+                o.causal_mode = next_value(&mut iter, "--causal-mode")?;
+                if o.causal_mode != "loo" && o.causal_mode != "greedy" {
+                    bail!("--causal-mode expects loo or greedy");
+                }
+                o.causal = true;
+            }
+            "--causal-candidates" => {
+                o.causal_candidates = Some(next_value(&mut iter, "--causal-candidates")?.parse()?);
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -1807,7 +1831,15 @@ async fn cmd_learncurve(opts: LearnCurveOpts) -> Result<()> {
                     }
                 }
             }
-            let cfg = default_code_causal_config();
+            let mut cfg = default_code_causal_config();
+            if opts.causal_mode == "greedy" {
+                cfg.mode = mnesio_causal::ScoreMode::GreedyAblation;
+                // Quadratic: the LOO default of 300 would be 45k passes.
+                cfg.max_candidates = 60;
+            }
+            if let Some(n) = opts.causal_candidates {
+                cfg.max_candidates = n;
+            }
             eprintln!(
                 "# causal pass: {} candidates × {} tasks ≈ {} retrievals…",
                 seen.len().min(cfg.max_candidates),
