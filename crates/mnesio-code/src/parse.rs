@@ -261,20 +261,19 @@ fn python_definition_at(line: &str) -> Option<(SymbolKind, String, usize)> {
     let t = line.trim_start();
     let rest = t.strip_prefix("async ").unwrap_or(t);
 
-    let (kw, base) = if let Some(r) = rest.strip_prefix("def ") {
-        (
-            r,
-            if indent > 0 {
-                SymbolKind::Method
-            } else {
-                SymbolKind::Function
-            },
-        )
-    } else if let Some(r) = rest.strip_prefix("class ") {
-        (r, SymbolKind::Class)
-    } else {
-        return None;
-    };
+    let (kw, base) = rest
+        .strip_prefix("def ")
+        .map(|r| {
+            (
+                r,
+                if indent > 0 {
+                    SymbolKind::Method
+                } else {
+                    SymbolKind::Function
+                },
+            )
+        })
+        .or_else(|| rest.strip_prefix("class ").map(|r| (r, SymbolKind::Class)))?;
 
     let name: String = kw
         .trim_start()
