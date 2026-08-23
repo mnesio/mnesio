@@ -60,6 +60,14 @@ Then, on each crate's page → **Settings → Trusted Publishing → Add**, set:
 - Repository name: `mnesio`
 - Workflow filename: `release.yml`
 
+**The `crates-io` job is gated off until you finish this section.** It only runs
+when the repository variable `PUBLISH_CRATES_IO` is set to `true`
+(repo → Settings → Secrets and variables → Actions → Variables). Without the
+gate the job fails on every tag with `Status: 400 — No Trusted Publishing
+config found`, which marks the whole release run red for setup that was never
+done. Flip the variable once the manual first publish *and* the per-crate
+trusted publishers are in place; after that, a failure is a real failure.
+
 Once every crate has a trusted publisher, the `crates-io` CI job takes over —
 delete your local token if you like.
 
@@ -86,6 +94,23 @@ OIDC. (The wheel is `linux/x86_64` manylinux only for now; add a matrix of
 runners/Python versions later for macOS/Windows/arm wheels.)
 
 ---
+
+### Note on the wheel build (fixed 2026-08-23)
+
+The PyPI job failed on v0.1.1 *before* it ever reached the publish step, so no
+amount of credential setup would have helped:
+
+```
+💥 maturin failed
+  Caused by: python-source is set to `.../crates/mnesio-py/python`, but the
+  python module at `.../crates/mnesio-py/python/mnesio` does not exist.
+```
+
+The package was renamed mneme → mnesio and the Python source directory was not:
+it was still `python/mneme/` while `module-name = "mnesio._mnesio"` expects
+`python/mnesio/`. Renamed. Verified locally with the same maturin version CI
+uses (1.14.1) by building the wheel, installing it into a clean virtualenv, and
+running a write + search round-trip — not just by watching it compile.
 
 ## 4. npm — first publish is MANUAL, then provenance
 

@@ -177,6 +177,19 @@ jobs:
   # manual (see PUBLISHING.md). This job handles every release after that.
   crates-io:
     name: crates.io
+    # Gated on a repository variable, because this job *cannot* succeed until a
+    # human has done the one-time setup: crates.io Trusted Publishing is
+    # configured per crate, and a crate can only be configured once it exists,
+    # so the first publish of each `mnesio-*` crate must be done manually with
+    # an API token (PUBLISHING.md §2). Until then the job fails with an opaque
+    # `Status: 400 — No Trusted Publishing config found`, which marks every
+    # release red for a reason that has nothing to do with the release.
+    #
+    # Set `PUBLISH_CRATES_IO=true` in repo → Settings → Variables once the
+    # manual first publish and the trusted publishers are in place. A failure
+    # after that is a real failure, which is the point of gating rather than
+    # swallowing the error with `continue-on-error`.
+    if: vars.PUBLISH_CRATES_IO == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
