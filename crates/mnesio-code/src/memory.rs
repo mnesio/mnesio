@@ -28,7 +28,7 @@
 //! unaffordable at any real budget. See `CLAUDE.md` Phase 17B for the full
 //! numbers, including the ones that don't flatter this design.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -49,6 +49,15 @@ use crate::{CodeIndexer, CodeParser, IndexStats, ParsedFile, SymbolKind};
 /// Indexing vendored or build output buries the code a query is actually
 /// about, and it is the difference between a corpus of thousands of symbols
 /// and hundreds of thousands.
+/// How many symbol bodies go to the embedder in one call.
+///
+/// Phase 18B. The embedder is invoked once per batch rather than once per
+/// symbol, which is where an 8.5-hour Kubernetes index spent most of its time.
+/// 256 is `fastembed`'s own default batch and keeps peak memory bounded — at
+/// this size a batch is a few MB of text, so a 73,567-symbol repository is 288
+/// calls instead of 73,567.
+const EMBED_BATCH: usize = 32;
+
 const SKIP_DIRS: &[&str] = &[
     "target",
     "node_modules",
@@ -415,22 +424,62 @@ impl CodeMemory {
         let mut links: HashMap<MemoryRef, Vec<MemoryRef>> = HashMap::new();
         let mut fresh: HashMap<u64, Vec<f32>> = HashMap::new();
 
+        // --- embed everything that misses the cache, in batches ---
+        //
+        // Phase 18B. This used to call `embed(slice::from_ref(&m.content))`
+        // inside the loop below, so a repository paid one model invocation per
+        // symbol: 73,567 of them on Kubernetes, and the dominant term in an
+        // 8.5-hour index. Every embedder here takes a slice and batches
+        // internally, so the per-call overhead was pure waste.
+        //
+        // Deduplicated by content hash before embedding, because a real
+        // codebase repeats itself — identical `Default` impls, generated
+        // accessors, re-exported stubs — and each distinct body only needs one
+        // vector however many symbols share it.
+        let mut needed: Vec<(u64, &str)> = Vec::new();
+        let mut queued: HashSet<u64> = HashSet::new();
+        for event in &plan.events {
+            if let Event::MemoryWritten(m) = event {
+                let key = content_hash(&m.content);
+                if !self.embeddings.contains_key(&key) && queued.insert(key) {
+                    needed.push((key, m.content.as_str()));
+                }
+            }
+        }
+
+        // Sorted by length before batching. A transformer pads every sequence
+        // in a batch to the longest member, and symbol bodies range from a
+        // three-line accessor to a 500-line function, so a length-mixed batch
+        // pays the maximum for all of it. Sorting makes each batch roughly
+        // homogeneous.
+        needed.sort_by_key(|(_, c)| c.len());
+
+        let mut computed: HashMap<u64, Vec<f32>> = HashMap::new();
+        for chunk in needed.chunks(EMBED_BATCH) {
+            let texts: Vec<String> = chunk.iter().map(|(_, c)| (*c).to_string()).collect();
+            let vectors = self.embedder.embed(&texts).await?;
+            if vectors.len() != chunk.len() {
+                return Err(MnesioError::Index(format!(
+                    "embedder returned {} vectors for {} inputs",
+                    vectors.len(),
+                    chunk.len()
+                )));
+            }
+            for ((key, _), v) in chunk.iter().zip(vectors) {
+                computed.insert(*key, v);
+            }
+        }
+
         for event in &plan.events {
             match event {
                 Event::MemoryWritten(m) => {
                     let key = content_hash(&m.content);
-                    let embedding = match self.embeddings.get(&key) {
-                        Some(v) => v.clone(),
-                        None => self
-                            .embedder
-                            .embed(std::slice::from_ref(&m.content))
-                            .await?
-                            .into_iter()
-                            .next()
-                            .ok_or_else(|| {
-                                MnesioError::Index("embedder returned no vector".into())
-                            })?,
-                    };
+                    let embedding = self
+                        .embeddings
+                        .get(&key)
+                        .or_else(|| computed.get(&key))
+                        .cloned()
+                        .ok_or_else(|| MnesioError::Index("embedder returned no vector".into()))?;
                     fresh.insert(key, embedding.clone());
 
                     let mut m = m.clone();
