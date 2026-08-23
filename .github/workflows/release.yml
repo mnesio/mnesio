@@ -58,6 +58,15 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
+        env:
+          # ONNX Runtime, pulled in by `fastembed`, is C++. Rust links the C
+          # runtime but not `libstdc++`, so on Linux the binary fails at link
+          # time with `undefined symbol: std::__cxx11::basic_string<...>`
+          # referenced by ort's `logging.cc`. macOS links libc++ implicitly via
+          # clang and Windows uses the MSVC runtime, so only the gnu targets
+          # need this. v0.1.1 shipped without any Linux asset for exactly this
+          # reason.
+          RUSTFLAGS: ${{ contains(matrix.target, 'linux') && '-C link-arg=-lstdc++' || '' }}
         run: |
           cargo build --release --target ${{ matrix.target }} \
             -p mnesio-code --bin mnesio-code --features tree-sitter
@@ -102,7 +111,13 @@ jobs:
           fi
           echo "asset=dist/$asset" >> "$GITHUB_OUTPUT"
 
+      # Tags only. `workflow_dispatch` exists so the build and the smoke test can
+      # be exercised *without* cutting a tag — publishing on dispatch would
+      # create a release named after the branch. Being able to prove the matrix
+      # builds before tagging is the whole point: v0.1.1 was tagged, and only
+      # then did anyone learn that neither Linux target links.
       - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
