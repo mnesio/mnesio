@@ -165,7 +165,7 @@ jobs:
           # arm64 under QEMU emulation on the shared runner times out. Add
           # arm64 later via a native arm runner if there's demand.
           platforms: linux/amd64
-          push: true
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -224,7 +224,13 @@ jobs:
           args: --release --out dist --sdist
           manylinux: auto
           working-directory: crates/mnesio-py
+      # Tags only. The *build* above runs on `workflow_dispatch` too, which is
+      # the point: the v0.1.1 PyPI failure was a maturin config error that
+      # happened before publishing was ever reached, and it could only have
+      # been caught by building. Publishing on a dispatch would push a real
+      # wheel to PyPI from a branch, which is not a rehearsal.
       - name: Publish to PyPI
+        if: startsWith(github.ref, 'refs/tags/')
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: crates/mnesio-py/dist
@@ -245,6 +251,7 @@ jobs:
       - working-directory: sdk/node
         run: npm ci || npm install
       - working-directory: sdk/node
+        if: startsWith(github.ref, 'refs/tags/')
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
