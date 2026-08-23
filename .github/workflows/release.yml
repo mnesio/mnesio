@@ -39,14 +39,24 @@ jobs:
         include:
           - { os: macos-14, target: aarch64-apple-darwin }
           - { os: macos-13, target: x86_64-apple-darwin }
-          # 22.04, not latest: a binary linked against 24.04's glibc 2.39 will
-          # not start on Debian 12 or Ubuntu 22.04, and the failure is an
-          # unexplained "GLIBC_2.39 not found" at exec time. Building on the
-          # older image sets the floor at glibc 2.35 instead. Older still would
-          # need musl, which the C grammars make fiddly enough to be its own
-          # task rather than a footnote in this one.
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          # 24.04, reluctantly. 22.04 was chosen first so the glibc floor stayed
+          # at 2.35 and the binary would start on Debian 12 — the right call in
+          # principle, and it produced **no Linux binary at all** for v0.1.1.
+          #
+          # The prebuilt ONNX Runtime that `fastembed` downloads is compiled
+          # against glibc 2.38+, so linking it on 22.04 fails with
+          # `undefined symbol: __isoc23_strtoll` (and `__isoc23_strtoull`),
+          # which are the glibc 2.38 versions of the C23 conversion functions.
+          # No linker flag fixes that; the dependency simply requires a newer
+          # libc than the image has.
+          #
+          # So the floor moves to glibc 2.39 and Debian 12 users lose the
+          # prebuilt binary — a real regression in reach, taken because the
+          # status quo is that *every* Linux user gets nothing. Going back to a
+          # lower floor means building ONNX Runtime from source or shipping a
+          # musl build, which is its own task rather than a footnote in this one.
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
