@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/mnesio/mnesio"
@@ -73,7 +73,22 @@ fjall = "2"
 tantivy = "0.22"
 hnsw_rs = "0.3"
 simsimd = "6"
-fastembed = "5"
+# rustls, not native-tls. fastembed's defaults are
+# `ort-download-binaries-native-tls` + `hf-hub-native-tls`, which pull in
+# `openssl-sys` and therefore need OpenSSL headers at build time. The manylinux
+# container used for the Python wheel has none, so the wheel build died with
+# "Package openssl was not found in the pkg-config search path" — after the
+# maturin config bug that was hiding it got fixed.
+#
+# Installing openssl-devel into the container would also work, but rustls
+# removes the system dependency instead of satisfying it, which is the better
+# answer for a wheel that has to be portable. `image-models` is kept because it
+# is in fastembed's default set.
+fastembed = { version = "5", default-features = false, features = [
+    "ort-download-binaries-rustls-tls",
+    "hf-hub-rustls-tls",
+    "image-models",
+] }
 
 # --- viz / server (mnesio-server only) ---
 axum = "0.7"
