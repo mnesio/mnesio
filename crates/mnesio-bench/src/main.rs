@@ -1811,7 +1811,7 @@ async fn cmd_learncurve(opts: LearnCurveOpts) -> Result<()> {
         // one that varies a symbol while holding the rest of the context fixed.
         if opts.causal && i == 0 {
             use mnesio_bench::codecausal::{
-                default_code_causal_config, format_contribution, run_code_causal,
+                code_causal_config_for, format_contribution, run_code_causal,
             };
             use mnesio_bench::learncurve::{split, Policy};
 
@@ -1831,7 +1831,9 @@ async fn cmd_learncurve(opts: LearnCurveOpts) -> Result<()> {
                     }
                 }
             }
-            let mut cfg = default_code_causal_config();
+            // Sized from the training split, so the noise floor is half of one
+            // task flipping rather than a constant from an older, smaller suite.
+            let mut cfg = code_causal_config_for(s.train.len());
             if opts.causal_mode == "greedy" {
                 cfg.mode = mnesio_causal::ScoreMode::GreedyAblation;
                 // Quadratic: the LOO default of 300 would be 45k passes.

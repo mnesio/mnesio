@@ -222,11 +222,27 @@ fn cfgeps(_r: &ContributionReport) -> f32 {
 /// retrievals. Start with the cheap mode, and only pay for greedy once
 /// leave-one-out has shown whether redundancy is actually the problem.
 pub fn default_code_causal_config() -> CausalConfig {
+    code_causal_config_for(24)
+}
+
+/// Bounds for a contribution pass over a suite of `tasks`.
+///
+/// **`epsilon` has to scale with the suite, and a fixed one silently hid every
+/// result this harness produced.** Contribution is a change in suite recall, so
+/// the smallest effect that can exist is one task flipping — `1/tasks`. The
+/// previous fixed `0.02` was derived from a 24-task suite, where one flip is
+/// 0.042 and half of that is a sensible noise floor. Run against 57 tasks, one
+/// flip is 0.0175, *below* the threshold, so every single-task effect was
+/// classified `inert` by arithmetic rather than by measurement — which is
+/// exactly what a flask run reported: 0 harmful, 299 of 300 inert, under both
+/// leave-one-out and greedy ablation.
+///
+/// So the floor is half of one task flip. Small enough that a real single-task
+/// effect is visible, large enough that float noise is not.
+pub fn code_causal_config_for(tasks: usize) -> CausalConfig {
     CausalConfig {
         max_candidates: 300,
-        // One task flipping in a 24-task suite is ~0.04, so anything below
-        // half of that is float noise rather than a small effect.
-        epsilon: 0.02,
+        epsilon: 0.5 / tasks.max(1) as f32,
         mode: ScoreMode::LeaveOneOut,
     }
 }
