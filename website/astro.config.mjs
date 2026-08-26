@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import react from "@astrojs/react";
 import remarkGfm from "remark-gfm";
 
 // Deploy target. `github.com/mnesio/mnesio` is a *project* repo, so GitHub
@@ -52,6 +53,9 @@ export default defineConfig({
     remarkPlugins: [remarkGfm, remarkBaseLinks],
   },
   integrations: [
+    // React islands, used only by the landing page's two animated elements.
+    // Starlight's doc pages stay static HTML and ship no runtime.
+    react(),
     starlight({
       title: "mnesio",
       tagline: "A memory that gets verifiably better.",

@@ -16,6 +16,10 @@
  * case where their approach is beaten, which is exactly why publishing ours is
  * worth more than another headline multiple.
  */
+import { LedgerPanel } from "../components/motion/LedgerPanel";
+import { StatFigures } from "../components/motion/StatFigures";
+import "../styles/landing.css";
+
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 /** Editors mnesio reaches through MCP, with the exact install line for each. */
@@ -92,161 +96,85 @@ const rules = [
   <body>
     <!-- Ambient field: a faint node lattice, because the product is a graph over
          an append-only log. Pure CSS + one SVG, no runtime cost. -->
-    <div class="field" aria-hidden="true">
-      <div class="glow glow-a"></div>
-      <div class="glow glow-b"></div>
-      <div class="grid"></div>
-    </div>
-
-    <header class="nav-wrap">
-      <nav class="nav">
-        <a class="brand" href={`${base}/`}>
-          <svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-            <defs>
-              <linearGradient id="ng" x1="4" y1="28" x2="28" y2="4" gradientUnits="userSpaceOnUse">
-                <stop stop-color="#2dd4bf" /><stop offset="1" stop-color="#818cf8" />
-              </linearGradient>
-            </defs>
-            <g stroke="url(#ng)" stroke-width="1.6" stroke-linecap="round" opacity=".9">
-              <line x1="7" y1="24" x2="7" y2="13" /><line x1="7" y1="13" x2="16" y2="8" />
-              <line x1="16" y1="8" x2="25" y2="13" /><line x1="25" y1="13" x2="25" y2="24" />
-              <line x1="16" y1="8" x2="16" y2="20" />
-            </g>
-            <g fill="#06070c" stroke="url(#ng)" stroke-width="1.6">
-              <circle cx="7" cy="24" r="2.6" /><circle cx="25" cy="24" r="2.6" />
-              <circle cx="16" cy="20" r="2.6" /><circle cx="7" cy="13" r="2.6" />
-              <circle cx="25" cy="13" r="2.6" />
-            </g>
-            <circle cx="16" cy="8" r="3.4" fill="url(#ng)" />
-          </svg>
-          <span>mnesio</span>
-        </a>
-        <div class="nav-links">
-          <a href="#gate">The gate</a>
-          <a href="#install">Install</a>
-          <a href="#numbers">Numbers</a>
-          <a href={`${base}/concepts/architecture/`}>Docs</a>
+    <div class="ln">
+      <!-- ============================ NAV ============================ -->
+      <header class="ln-nav">
+        <div class="ln-nav-inner">
+          <a class="ln-brand" href={`${base}/`}>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+              <rect x="0.75" y="0.75" width="16.5" height="16.5" stroke="currentColor" stroke-width="1.5" />
+              <path d="M4.5 12.5V5.5L9 10L13.5 5.5v7" stroke="currentColor" stroke-width="1.5" fill="none" />
+            </svg>
+            mnesio
+          </a>
+          <div class="ln-nav-links">
+            <a href="#gate">The gate</a>
+            <a href="#install">Install</a>
+            <a href="#numbers">Numbers</a>
+            <a href={`${base}/concepts/architecture/`}>Docs</a>
+          </div>
+          <a class="ln-nav-gh" href="https://github.com/mnesio/mnesio">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38l-.01-1.49C3.76 14.18 3.33 13 3.33 13c-.36-.92-.88-1.16-.88-1.16-.72-.49.05-.48.05-.48.8.06 1.22.82 1.22.82.71 1.21 1.87.86 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+            </svg>
+            GitHub
+          </a>
         </div>
-        <div class="nav-cta">
-          <a class="btn btn-ghost" href="https://github.com/mnesio/mnesio">GitHub</a>
-          <a class="btn btn-primary" href="#install">Get started</a>
-        </div>
-      </nav>
-    </header>
+      </header>
 
-    <main>
-      <!-- ================= HERO ================= -->
-      <section class="hero">
-        <div class="wrap hero-grid">
-          <div class="hero-copy">
-            <div class="eyebrow">
-              <span class="dot dot-teal"></span> CODE MEMORY
-              <span class="sep">·</span>
-              <span class="dot dot-emerald"></span> GATED LEARNING
-            </div>
+      <!-- ============================ HERO ===========================
+           Swiss grid: copy on columns 1-7, the ledger on 8-12. The
+           asymmetry is the point — a centred hero would give the headline
+           and the evidence equal weight, and here the evidence is the
+           argument. -->
+      <section class="ln-hero">
+        <div class="ln-grid">
+          <div class="ln-hero-copy">
+            <p class="ln-eyebrow">Code memory · Rust · Apache-2.0</p>
 
-            <h1>
-              Don't retrieve code that <em>looks</em> relevant.<br />
-              Retrieve the code that's been
-              <span class="grad">proven to help</span>.
+            <h1 class="ln-h1">
+              Don't retrieve code that looks relevant. Retrieve what's
+              <em>proven to help</em>.
             </h1>
 
-            <p class="sub">
-              mnesio is a Rust memory layer for coding agents. It records whether
-              the context it gave you actually worked — did the build pass, did
-              tests go green, was the diff accepted — and compiles that evidence
-              into retrieval policy. Every change is re-evaluated against a
-              canary set first, and <strong>refused</strong> if it regresses.
+            <p class="ln-lede">
+              mnesio records whether the context it gave your agent actually
+              worked — did the build pass, did tests go green, was the diff
+              accepted — and compiles that evidence into retrieval policy.
+              Every change is re-evaluated against a canary set first, and
+              <strong>refused</strong> if it regresses.
             </p>
 
-            <div class="actions">
-              <a class="btn btn-primary btn-lg" href="#install">
-                Install in your editor <span class="arr">→</span>
+            <div class="ln-actions">
+              <a class="ln-btn ln-btn-primary" href="#install">
+                Install in your editor
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M1 7h11M8 3l4 4-4 4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
               </a>
-              <a class="btn btn-ghost btn-lg" href="#numbers">See the measurements</a>
+              <a class="ln-btn ln-btn-ghost" href="#numbers">See the measurements</a>
             </div>
 
-            <p class="micro">
-              Apache-2.0 · runs entirely on your machine · no telemetry ·
-              30 languages · 616 tests
+            <p class="ln-meta">
+              runs entirely on your machine · no telemetry · 30 languages · 728 tests
             </p>
           </div>
 
-          <!-- The signature visual: the ledger. A competitor's landing page can
-               show a graph; none of them can show a *refusal*. -->
-          <aside class="ledger" aria-label="Example gate ledger">
-            <div class="ledger-head">
-              <span class="mono">policy ledger</span>
-              <span class="pulse"><i></i> live</span>
-            </div>
-
-            <div class="entry entry-ok">
-              <div class="entry-top">
-                <span class="verdict verdict-ok">COMMITTED</span>
-                <span class="mono tiny">gen 4 · +6pp held-out</span>
-              </div>
-              <p class="entry-rule mono">-exclude:tests/fixtures/* for class “migration”</p>
-              <p class="entry-why">
-                Fixtures ranked in the top 5 on 11 migration tasks and helped in
-                none. Canaries held at 0.82. Committed.
-              </p>
-            </div>
-
-            <div class="entry entry-no">
-              <div class="entry-top">
-                <span class="verdict verdict-no">REFUSED</span>
-                <span class="mono tiny">canary 0.82 → 0.71</span>
-              </div>
-              <p class="entry-rule mono">-exclude:src/db/pool.rs for class “timeout”</p>
-              <p class="entry-why">
-                Looked dead on the training split. Re-running the canaries showed
-                it was the only answer to three of them. Not shipped.
-              </p>
-            </div>
-
-            <div class="ledger-foot">
-              <span>Hard Rule #1 — <span class="mono">EvalReport::is_committable()</span></span>
-            </div>
-          </aside>
-        </div>
-      </section>
-
-      <!-- ================= PROOF STRIP ================= -->
-      <section class="strip">
-        <div class="wrap">
-          <div class="strip-grid">
-            <div class="stat">
-              <div class="stat-num">4.8×</div>
-              <div class="stat-label">fewer tokens at equal recall</div>
-              <div class="stat-sub">symbol context vs whole-file, paired A/B on one index</div>
-            </div>
-            <div class="stat">
-              <div class="stat-num">4.11<span class="unit">ms</span></div>
-              <div class="stat-label">query latency p99</div>
-              <div class="stat-sub">at 105,000 memories indexed</div>
-            </div>
-            <div class="stat">
-              <div class="stat-num">526</div>
-              <div class="stat-label">queries across 10 pinned public repos</div>
-              <div class="stat-sub">
-                derived from those repos' own git history · runs in ~300s ·
-                <code>manifest run</code>
-              </div>
-            </div>
-            <div class="stat">
-              <div class="stat-num">30</div>
-              <div class="stat-label">languages via tree-sitter</div>
-              <div class="stat-sub">Rust, Python, TS, Go, Java, C#, Swift, Kotlin, Zig…</div>
-            </div>
+          <div class="ln-hero-aside">
+            <LedgerPanel client:load />
           </div>
-          <p class="strip-note">
-            Every one of these is a number we produced ourselves and can re-run.
-            The ones that <em>don't</em> flatter us are
-            <a href="#numbers">further down the page</a>, at the same size.
-          </p>
         </div>
       </section>
 
+      <!-- ========================= PROOF STRIP =======================
+           Real measurements only, each with the condition it was taken
+           under — including the one that is unflattering. -->
+      <section class="ln-stats" id="numbers">
+        <StatFigures client:load />
+      </section>
+    </div>
+
+    <main>
       <!-- ================= THE GATE ================= -->
       <section id="gate" class="section">
         <div class="wrap">
