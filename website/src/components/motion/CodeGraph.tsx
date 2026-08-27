@@ -23,20 +23,50 @@
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
-type Node = { id: string; x: number; y: number; label: string; tier: 0 | 1 | 2 };
+type Seed = { id: string; label: string; tier: 0 | 1 | 2 };
+type Node = Seed & { x: number; y: number; w: number };
 
-/* Deterministic layout — a call graph reads top-down, so tiers are rows and
-   the horizontal spread keeps edges from overlapping. */
-const NODES: Node[] = [
-  { id: "ctx", x: 218, y: 34, label: "code_context", tier: 0 },
-  { id: "ret", x: 92, y: 116, label: "HybridRetriever", tier: 1 },
-  { id: "bm", x: 214, y: 116, label: "Bm25View", tier: 1 },
-  { id: "vec", x: 336, y: 116, label: "VectorView", tier: 1 },
-  { id: "res", x: 40, y: 200, label: "resolve", tier: 2 },
-  { id: "pack", x: 158, y: 200, label: "pack", tier: 2 },
-  { id: "graph", x: 272, y: 200, label: "CodeGraph", tier: 2 },
-  { id: "fix", x: 380, y: 200, label: "fixtures", tier: 2 },
+/* Tiers are rows: a call graph reads top-down. */
+const SEEDS: Seed[][] = [
+  [{ id: "ctx", label: "code_context", tier: 0 }],
+  [
+    { id: "ret", label: "HybridRetriever", tier: 1 },
+    { id: "bm", label: "Bm25View", tier: 1 },
+    { id: "vec", label: "VectorView", tier: 1 },
+  ],
+  [
+    { id: "res", label: "resolve", tier: 2 },
+    { id: "pack", label: "pack", tier: 2 },
+    { id: "graph", label: "CodeGraph", tier: 2 },
+    { id: "fix", label: "fixtures", tier: 2 },
+  ],
 ];
+
+const VIEW_W = 460;
+const NODE_H = 26;
+const ROW_Y = [34, 116, 200];
+/* JetBrains Mono at 10.5px advances ~6.3px per character. Boxes are sized from
+   the label rather than fixed: a 15-character symbol like `HybridRetriever`
+   overflowed an 84px box by 34px, which is what put text outside the cards. */
+const CHAR_W = 6.3;
+const PAD_X = 14;
+const GAP = 14;
+
+const nodeWidth = (label: string) =>
+  Math.round(label.length * CHAR_W + PAD_X * 2);
+
+/** Lay each tier out centred, with equal gaps, from the measured widths. */
+const NODES: Node[] = SEEDS.flatMap((row, tier) => {
+  const widths = row.map((n) => nodeWidth(n.label));
+  const total = widths.reduce((a, b) => a + b, 0) + GAP * (row.length - 1);
+  let cursor = (VIEW_W - total) / 2;
+  return row.map((n, i) => {
+    const w = widths[i];
+    const x = cursor + w / 2;
+    cursor += w + GAP;
+    return { ...n, x, y: ROW_Y[tier], w };
+  });
+});
 
 const EDGES: [string, string][] = [
   ["ctx", "ret"],
@@ -53,9 +83,6 @@ const EDGES: [string, string][] = [
 const RETRIEVED = new Set(["ctx", "ret", "bm", "pack", "res"]);
 /** The one the gate throws out — fixtures ranked high and never helped. */
 const REFUSED = "fix";
-
-const NODE_W = 84;
-const NODE_H = 26;
 
 const PHASES = ["parse", "link", "retrieve", "gate"] as const;
 type Phase = (typeof PHASES)[number];
@@ -108,7 +135,7 @@ export function CodeGraph() {
         <span className="ln-graph-phase">{phase ?? "indexed"}</span>
       </div>
 
-      <svg viewBox="0 0 440 250" role="img" aria-hidden="true">
+      <svg viewBox="0 0 460 250" role="img" aria-hidden="true">
         {/* --- edges --- */}
         <g fill="none" strokeWidth="1.25">
           {EDGES.map(([a, b], i) => {
@@ -161,9 +188,9 @@ export function CodeGraph() {
               style={{ transformOrigin: `${n.x}px ${n.y}px` }}
             >
               <rect
-                x={n.x - NODE_W / 2}
+                x={n.x - n.w / 2}
                 y={n.y - NODE_H / 2}
-                width={NODE_W}
+                width={n.w}
                 height={NODE_H}
                 /* Square, matching the rest of the page. */
                 fill={isLit ? "rgba(34,197,94,0.16)" : "rgba(15,23,42,0.92)"}
@@ -190,9 +217,9 @@ export function CodeGraph() {
                   rank it lower, it removed it from the context. */}
               {isRefused && (
                 <motion.line
-                  x1={n.x - NODE_W / 2 + 6}
+                  x1={n.x - n.w / 2 + 6}
                   y1={n.y}
-                  x2={n.x + NODE_W / 2 - 6}
+                  x2={n.x + n.w / 2 - 6}
                   y2={n.y}
                   stroke="var(--ln-refuse, #f87171)"
                   strokeWidth="1.25"

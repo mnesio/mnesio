@@ -17,6 +17,7 @@
  * worth more than another headline multiple.
  */
 import { CodeGraph } from "../components/motion/CodeGraph";
+import { MemoryTimeline } from "../components/motion/MemoryTimeline";
 import { LedgerPanel } from "../components/motion/LedgerPanel";
 import { StatFigures } from "../components/motion/StatFigures";
 import "../styles/landing.css";
@@ -172,19 +173,20 @@ const rules = [
       <section class="ln-hero">
         <div class="ln-grid">
           <div class="ln-hero-copy">
-            <p class="ln-eyebrow">Code memory · Rust · Apache-2.0</p>
+            <p class="ln-eyebrow">Two engines · Rust · Apache-2.0</p>
 
             <h1 class="ln-h1">
-              Don't retrieve code that looks relevant. Retrieve what's
-              <em>proven to help</em>.
+              A code graph and an agent memory that both
+              <em>prove they got better</em>.
             </h1>
 
             <p class="ln-lede">
-              mnesio records whether the context it gave your agent actually
-              worked — did the build pass, did tests go green, was the diff
-              accepted — and compiles that evidence into retrieval policy.
-              Every change is re-evaluated against a canary set first, and
-              <strong>refused</strong> if it regresses.
+              One Rust engine, two jobs. <strong>Code memory</strong> retrieves
+              the symbols a task needs and learns which ones actually helped.
+              <strong>Agent memory</strong> stores facts on an append-only,
+              bi-temporal log it can time-travel and erase. Both improve only
+              through a gate that <strong>refuses</strong> a change that
+              regresses.
             </p>
 
             <div class="ln-actions">
@@ -203,10 +205,135 @@ const rules = [
           </div>
 
           <div class="ln-hero-aside">
-            <!-- The product's own loop, animated: parse -> link -> retrieve ->
-                 gate. It ends on a refusal because that is the step nobody
-                 else has. -->
+            <!-- The gate is what both engines share, so the hero keeps the
+                 ledger; each engine's own animation lives beside its
+                 scorecard below. -->
+            <LedgerPanel client:load />
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================== TWO ENGINES ========================
+           mnesio is two products sharing one substrate, and a single merged
+           pitch made it read as one. Each engine gets its own animation and
+           its own scorecard, because they compete in different fields —
+           nobody evaluates Mem0 against graphify. -->
+      <section class="ln-engines" id="engines">
+        <div class="ln-grid">
+          <!-- ---------------- code memory ---------------- -->
+          <div class="ln-engine">
+            <div class="ln-engine-kicker">
+              <span>engine 01</span>
+              <h2>Code memory</h2>
+            </div>
+            <p class="ln-engine-lede">
+              Parses a repository into symbols and call edges, retrieves the few
+              a task actually needs, and records whether the edit that followed
+              compiled, passed, or was thrown away. That evidence compiles into
+              retrieval policy — behind the gate.
+            </p>
+
             <CodeGraph client:load />
+
+            <table class="ln-vs">
+              <caption>vs. the code-context field</caption>
+              <thead>
+                <tr>
+                  <th scope="col">System</th>
+                  <th scope="col">Symbol graph</th>
+                  <th scope="col">Learns from outcomes</th>
+                  <th scope="col">Gated</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="is-us">
+                  <th scope="row">mnesio</th>
+                  <td class="yes">yes</td>
+                  <td class="yes">yes</td>
+                  <td class="yes">yes</td>
+                </tr>
+                <tr>
+                  <th scope="row">graphify</th>
+                  <td class="yes">yes</td>
+                  <td class="yes">records them</td>
+                  <td class="no">no — writes a doc</td>
+                </tr>
+                <tr>
+                  <th scope="row">codebase-memory-mcp</th>
+                  <td class="yes">yes, LSP types</td>
+                  <td class="no">no</td>
+                  <td class="no">no</td>
+                </tr>
+                <tr>
+                  <th scope="row">Cursor · Sourcegraph · Aider</th>
+                  <td class="yes">yes</td>
+                  <td class="no">no</td>
+                  <td class="no">no</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="ln-meta">
+              Where they lead: 158 grammars and 28M LOC in 3 min, against our 30
+              and 37.7 min. <a href={`${base}/reference/benchmarks/`}>The numbers</a>.
+            </p>
+          </div>
+
+          <!-- ---------------- agent memory ---------------- -->
+          <div class="ln-engine">
+            <div class="ln-engine-kicker">
+              <span>engine 02</span>
+              <h2>Agent memory</h2>
+            </div>
+            <p class="ln-engine-lede">
+              Facts, decisions and conversation on an append-only bi-temporal
+              log. A contradiction supersedes rather than overwrites, any past
+              state can be reconstructed, and a subject can be erased by
+              dropping their key — on a log that is never rewritten.
+            </p>
+
+            <MemoryTimeline client:load />
+
+            <table class="ln-vs">
+              <caption>vs. the agent-memory field</caption>
+              <thead>
+                <tr>
+                  <th scope="col">System</th>
+                  <th scope="col">Bi-temporal</th>
+                  <th scope="col">Erasure</th>
+                  <th scope="col">Gated learning</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="is-us">
+                  <th scope="row">mnesio</th>
+                  <td class="yes">yes</td>
+                  <td class="yes">crypto-shred</td>
+                  <td class="yes">yes</td>
+                </tr>
+                <tr>
+                  <th scope="row">Zep / Graphiti</th>
+                  <td class="yes">yes</td>
+                  <td class="no">no</td>
+                  <td class="no">no</td>
+                </tr>
+                <tr>
+                  <th scope="row">Mem0</th>
+                  <td class="no">no</td>
+                  <td class="no">no</td>
+                  <td class="no">no</td>
+                </tr>
+                <tr>
+                  <th scope="row">Letta · Cognee · LangMem</th>
+                  <td class="no">no</td>
+                  <td class="no">no</td>
+                  <td class="no">self-edit, ungated</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="ln-meta">
+              Where they lead: they publish LoCoMo and LongMemEval numbers and we
+              do not yet. <a href={`${base}/reference/comparison/`}>Full scorecard</a>.
+            </p>
           </div>
         </div>
       </section>

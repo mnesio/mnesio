@@ -439,6 +439,164 @@
   border-color: #7f1d1d;
 }
 
+/* ------------------------------------------------------------------ log --- */
+
+.ln-log {
+  margin: 0;
+  padding: var(--ln-2);
+  list-style: none;
+  /* The graph SVG has a 460x250 viewBox and scales with its column, so a fixed
+     min-height here only matched at one window size — the two engine panels
+     drifted 151px apart and their comparison tables stopped lining up. Sharing
+     the SVG's aspect ratio makes the log scale identically at every width. */
+  aspect-ratio: 460 / 250;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.ln-log-row {
+  display: grid;
+  grid-template-columns: 34px 54px 1fr;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--ln-line);
+  font-family: var(--ln-mono);
+  font-size: 12px;
+  align-items: baseline;
+}
+
+.ln-log-row:last-child {
+  border-bottom: 0;
+}
+
+.ln-log-t {
+  color: var(--ln-muted);
+}
+
+.ln-log-subject {
+  color: var(--ln-accent);
+}
+
+.ln-log-fact {
+  color: var(--ln-dim);
+}
+
+/* Invalidated, not deleted — the row stays on the page because it stays in the
+   log. That distinction is the product. */
+.ln-log-row.is-dead .ln-log-fact {
+  text-decoration: line-through;
+  text-decoration-color: var(--ln-refuse);
+  color: var(--ln-muted);
+}
+
+.ln-log-row.is-shred .ln-log-fact,
+.ln-log-row.is-shred .ln-log-subject {
+  color: var(--ln-muted);
+  letter-spacing: 0.06em;
+}
+
+/* --------------------------------------------------------------- engines --- */
+
+.ln-engines {
+  padding: var(--ln-8) 0;
+  border-top: 1px solid var(--ln-line);
+}
+
+.ln-engine {
+  grid-column: span 6;
+}
+
+.ln-engine-kicker {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 var(--ln-2);
+}
+
+.ln-engine-kicker h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ln-text);
+}
+
+.ln-engine-kicker span {
+  font-family: var(--ln-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ln-accent);
+}
+
+.ln-engine-lede {
+  margin: 0 0 var(--ln-3);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--ln-dim);
+  min-height: 76px;
+}
+
+/* Competitor tables: one per engine, so each is compared against its own
+   field rather than a merged list nobody competes in. */
+.ln-vs {
+  width: 100%;
+  margin-top: var(--ln-3);
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.ln-vs caption {
+  padding-bottom: 8px;
+  font-family: var(--ln-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ln-muted);
+  text-align: left;
+}
+
+.ln-vs th,
+.ln-vs td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ln-line);
+  text-align: left;
+}
+
+.ln-vs thead th {
+  font-family: var(--ln-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--ln-muted);
+  text-transform: uppercase;
+}
+
+.ln-vs tbody th {
+  font-weight: 500;
+  color: var(--ln-dim);
+}
+
+.ln-vs .yes { color: var(--ln-accent); }
+.ln-vs .no  { color: var(--ln-muted); }
+
+.ln-vs tr.is-us th,
+.ln-vs tr.is-us td {
+  color: var(--ln-text);
+  font-weight: 600;
+  background: rgba(34, 197, 94, 0.07);
+}
+
+@media (max-width: 1024px) {
+  .ln-engine {
+    grid-column: 1 / -1;
+  }
+  .ln-engine + .ln-engine {
+    margin-top: var(--ln-8);
+  }
+}
+
 /* ---------------------------------------------------------------- stats --- */
 
 .ln-stats {
