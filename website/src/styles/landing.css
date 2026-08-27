@@ -33,6 +33,8 @@
   --ln-dim: #cbd5e1;
   --ln-muted: #94a3b8;
   --ln-line: #24324a;
+  --ln-line-strong: #3a4a68;
+  --ln-refuse: #f87171;
 
   /* 8px base unit — "mathematical spacing" is the Swiss rule doing the work. */
   --ln-1: 8px;
@@ -46,7 +48,11 @@
   --ln-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
   --ln-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  background: var(--ln-bg);
+  /* Transparent, not `--ln-bg`. An opaque shell here sits at z-index 1 and
+     paints straight over the background field — which is exactly what hid it
+     the first time. The base colour lives on `body` instead, so the mesh
+     shows through everything that does not explicitly need a backing. */
+  background: transparent;
   color: var(--ln-text);
   font-family: var(--ln-sans);
   font-size: 16px; /* generated rule: minimum 16px body on mobile */
@@ -345,6 +351,94 @@
   color: var(--ln-muted);
 }
 
+/* ---------------------------------------------------------------- graph --- */
+
+.ln-graph {
+  margin: 0;
+  border: 1px solid var(--ln-line);
+  background: rgba(15, 23, 42, 0.78);
+  backdrop-filter: blur(10px);
+}
+
+.ln-graph-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px var(--ln-2);
+  border-bottom: 1px solid var(--ln-line);
+  font-family: var(--ln-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ln-muted);
+}
+
+/* The phase name is the only thing on the page that changes on a timer, so it
+   gets the accent — it reads as a live readout rather than a label. */
+.ln-graph-phase {
+  color: var(--ln-accent);
+}
+
+.ln-graph svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.ln-graph-label {
+  font-family: var(--ln-mono);
+  font-size: 10.5px;
+  fill: var(--ln-dim);
+}
+
+.ln-graph-label.is-lit {
+  fill: var(--ln-text);
+}
+
+.ln-graph-label.is-refused {
+  fill: var(--ln-refuse);
+}
+
+.ln-graph-cap {
+  padding: 12px var(--ln-2) var(--ln-2);
+  border-top: 1px solid var(--ln-line);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ln-muted);
+  /* Reserve height so the caption swapping between phases cannot shift the
+     layout under it — the generated `content-jumping` rule. */
+  min-height: 64px;
+}
+
+.ln-graph-cap code {
+  font-family: var(--ln-mono);
+  font-size: 11.5px;
+  color: var(--ln-dim);
+}
+
+.ln-graph-verdict {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 2px 7px;
+  font-family: var(--ln-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ln-muted);
+  border: 1px solid var(--ln-line);
+}
+
+.ln-graph-verdict.is-ok {
+  color: #04120a;
+  background: var(--ln-accent);
+  border-color: var(--ln-accent);
+}
+
+.ln-graph-verdict.is-refused {
+  color: var(--ln-refuse);
+  border-color: #7f1d1d;
+}
+
 /* ---------------------------------------------------------------- stats --- */
 
 .ln-stats {
@@ -456,103 +550,111 @@
 }
 
 /* =========================================================================
-   Aurora background — added after the first pass read as flat and lifeless.
+   Background — a drifting code graph.
 
-   Technique from the ui-ux-pro-max `Aurora UI` record: mesh gradient, depth
-   via colour layering, "subtle 8-12s animations". Its stock palette is neon
-   cyan/magenta/yellow, which would be absurd on a memory engine, so only the
-   *method* is borrowed — the colours stay the generated slate-and-green.
+   The first attempt used generic coloured blobs and read as decoration bolted
+   onto the page. This one is the same subject as the product: tiled symbol
+   nodes joined by call edges, on two layers moving at different speeds so the
+   field has depth rather than sliding as one sheet.
 
-   Animated with `transform` only, never `background-position`, per the
-   generated `transform-performance` rule: transforms are composited, so four
-   large blurred layers drift without repainting on every frame.
+   Animated with `transform` only, per the generated `transform-performance`
+   rule, and kept faint enough that the full-page contrast audit still passes
+   with the layers composited in.
    ========================================================================= */
 
-.ln-aurora {
+.ln-bg {
   position: fixed;
   inset: 0;
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
-  /* Sits behind content but above the page background. Contrast was
-     re-measured across the whole page with these layers composited in. */
-  opacity: 1;
 }
 
-.ln-aurora span {
+.ln-bg-mesh {
   position: absolute;
-  display: block;
-  border-radius: 50%;
-  filter: blur(72px);
+  /* Oversized so a drifting layer never exposes an edge. */
+  top: -20%;
+  left: -20%;
+  width: 140%;
+  height: 140%;
+  color: #7f9ccb;
+}
+
+.ln-bg-layer {
   will-change: transform;
 }
 
-.ln-aurora .a1 {
+/* Far layer: smaller, dimmer, slower — the parallax that sells the depth. */
+.ln-bg-far {
+  opacity: 0.13;
+  transform-origin: center;
+  animation: ln-net-far 90s linear infinite;
+}
+
+.ln-bg-near {
+  opacity: 0.07;
+  transform-origin: center;
+  animation: ln-net-near 60s linear infinite;
+}
+
+/* Translating by exactly one pattern tile (220x180) makes the loop seamless —
+   the field never visibly jumps back to the start. */
+@keyframes ln-net-far {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-220px, -180px, 0); }
+}
+
+@keyframes ln-net-near {
+  from { transform: translate3d(0, 0, 0) scale(1.6); }
+  to   { transform: translate3d(220px, -180px, 0) scale(1.6); }
+}
+
+.ln-bg-glow {
+  position: absolute;
+  display: block;
+  border-radius: 50%;
+  filter: blur(110px);
+  will-change: transform;
+}
+
+.ln-bg-glow.g1 {
   width: 46vw;
   height: 46vw;
-  top: -14vw;
-  left: -6vw;
-  background: radial-gradient(circle, rgba(34, 197, 94, 0.40), transparent 68%);
-  animation: ln-drift-a 22s ease-in-out infinite alternate;
+  top: -16vw;
+  left: -8vw;
+  background: radial-gradient(circle, rgba(34, 197, 94, 0.20), transparent 68%);
+  animation: ln-glow-a 28s ease-in-out infinite alternate;
 }
 
-.ln-aurora .a2 {
-  width: 40vw;
-  height: 40vw;
-  top: -6vw;
-  right: -8vw;
-  background: radial-gradient(circle, rgba(56, 116, 220, 0.46), transparent 68%);
-  animation: ln-drift-b 26s ease-in-out infinite alternate;
+.ln-bg-glow.g2 {
+  width: 42vw;
+  height: 42vw;
+  top: 8vh;
+  right: -10vw;
+  background: radial-gradient(circle, rgba(56, 116, 220, 0.22), transparent 68%);
+  animation: ln-glow-b 34s ease-in-out infinite alternate;
 }
 
-.ln-aurora .a3 {
-  width: 38vw;
-  height: 38vw;
-  top: 46vh;
-  left: 28vw;
-  background: radial-gradient(circle, rgba(124, 92, 220, 0.36), transparent 70%);
-  animation: ln-drift-c 30s ease-in-out infinite alternate;
-}
-
-.ln-aurora .a4 {
-  width: 34vw;
-  height: 34vw;
-  bottom: -10vw;
-  right: 6vw;
-  background: radial-gradient(circle, rgba(34, 197, 94, 0.30), transparent 70%);
-  animation: ln-drift-a 34s ease-in-out infinite alternate-reverse;
-}
-
-@keyframes ln-drift-a {
+@keyframes ln-glow-a {
   from { transform: translate3d(0, 0, 0) scale(1); }
-  to   { transform: translate3d(6vw, 5vh, 0) scale(1.14); }
+  to   { transform: translate3d(7vw, 6vh, 0) scale(1.15); }
 }
 
-@keyframes ln-drift-b {
-  from { transform: translate3d(0, 0, 0) scale(1.06); }
-  to   { transform: translate3d(-7vw, 7vh, 0) scale(0.94); }
+@keyframes ln-glow-b {
+  from { transform: translate3d(0, 0, 0) scale(1.08); }
+  to   { transform: translate3d(-6vw, 8vh, 0) scale(0.95); }
 }
 
-@keyframes ln-drift-c {
-  from { transform: translate3d(0, 0, 0) scale(0.96); }
-  to   { transform: translate3d(5vw, -6vh, 0) scale(1.12); }
-}
-
-/* A hairline grid over the aurora. It keeps the page reading as an
-   engineering document rather than a lava lamp — the drift supplies life, the
-   grid supplies rigour. */
-.ln-aurora::after {
+/* Fade the whole field toward the foot of the viewport so long text sections
+   further down sit on flat ground. */
+.ln-bg::after {
   content: "";
   position: absolute;
   inset: 0;
-  background-image:
-    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
-  background-size: 64px 64px;
-  mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 78%);
+  background: linear-gradient(180deg, transparent 40%, rgba(15, 23, 42, 0.55) 100%);
 }
 
-/* Content sits above the aurora. */
+/* Content above the background. */
 .ln,
 body > main,
 body > footer {
@@ -560,10 +662,18 @@ body > footer {
   z-index: 1;
 }
 
-/* Generated rule `reduced-motion`, High severity. The aurora is decorative,
-   so it stops entirely rather than merely slowing down. */
+/* Generated rule `reduced-motion`, High severity. The field is decorative, so
+   it stops completely rather than slowing. */
 @media (prefers-reduced-motion: reduce) {
-  .ln-aurora span {
+  .ln-bg-layer,
+  .ln-bg-glow {
     animation: none !important;
   }
+}
+
+
+/* The page ground. Previously set on `.ln`, where it covered the background
+   field; on the document it sits *behind* the fixed layer instead. */
+body {
+  background: var(--ln-bg, #0f172a);
 }

@@ -16,6 +16,7 @@
  * case where their approach is beaten, which is exactly why publishing ours is
  * worth more than another headline multiple.
  */
+import { CodeGraph } from "../components/motion/CodeGraph";
 import { LedgerPanel } from "../components/motion/LedgerPanel";
 import { StatFigures } from "../components/motion/StatFigures";
 import "../styles/landing.css";
@@ -96,12 +97,45 @@ const rules = [
   <body>
     <!-- Ambient field: a faint node lattice, because the product is a graph over
          an append-only log. Pure CSS + one SVG, no runtime cost. -->
-    <!-- Aurora: four blurred layers drifting on 22-34s loops. Decorative and
-         inert — aria-hidden, pointer-events: none, and stopped entirely under
-         prefers-reduced-motion. -->
-    <div class="ln-aurora" aria-hidden="true">
-      <span class="a1"></span><span class="a2"></span>
-      <span class="a3"></span><span class="a4"></span>
+    <!-- ===================== BACKGROUND =====================
+         A drifting node-graph field rather than generic blobs: the page is
+         about a code graph, so the background is one too — faint symbols and
+         call edges, tiled and parallaxed on two layers at different speeds.
+
+         Pure SVG + CSS animation, deliberately not framer-motion: this runs
+         for the life of the page, and a CSS transform animation is composited
+         off the main thread instead of re-rendering React on every frame.
+
+         Decorative and inert — aria-hidden, pointer-events: none, and stopped
+         entirely under prefers-reduced-motion. -->
+    <div class="ln-bg" aria-hidden="true">
+      <svg class="ln-bg-mesh" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <pattern id="lnNet" width="220" height="180" patternUnits="userSpaceOnUse">
+            <path
+              d="M30 24 H86 M86 24 V78 M86 78 H150 M150 78 V132 M30 24 V96 M30 96 H86 M150 24 H196 M196 24 V78"
+              fill="none" stroke="currentColor" stroke-width="1" />
+            <g fill="currentColor">
+              <rect x="26" y="20" width="8" height="8" />
+              <rect x="82" y="20" width="8" height="8" />
+              <rect x="146" y="20" width="8" height="8" />
+              <rect x="192" y="20" width="8" height="8" />
+              <rect x="82" y="74" width="8" height="8" />
+              <rect x="146" y="74" width="8" height="8" />
+              <rect x="26" y="92" width="8" height="8" />
+              <rect x="146" y="128" width="8" height="8" />
+              <rect x="192" y="74" width="8" height="8" />
+            </g>
+          </pattern>
+        </defs>
+        <rect class="ln-bg-layer ln-bg-far" width="100%" height="100%" fill="url(#lnNet)" />
+        <rect class="ln-bg-layer ln-bg-near" width="100%" height="100%" fill="url(#lnNet)" />
+      </svg>
+
+      <!-- Two soft lights for depth, so the mesh sits in a space rather than
+           on a flat sheet. -->
+      <span class="ln-bg-glow g1"></span>
+      <span class="ln-bg-glow g2"></span>
     </div>
 
     <div class="ln">
@@ -169,7 +203,10 @@ const rules = [
           </div>
 
           <div class="ln-hero-aside">
-            <LedgerPanel client:load />
+            <!-- The product's own loop, animated: parse -> link -> retrieve ->
+                 gate. It ends on a refusal because that is the step nobody
+                 else has. -->
+            <CodeGraph client:load />
           </div>
         </div>
       </section>
@@ -1327,7 +1364,10 @@ const rules = [
         content: "";
         position: absolute;
         inset: 0;
-        background: rgba(15, 23, 42, 0.82);
+        /* 0.62, not 0.82: enough backing that drifting light cannot wash out
+           running text, sheer enough that the graph field stays visible
+           through the section. Re-audited for contrast at this value. */
+        background: rgba(15, 23, 42, 0.62);
         pointer-events: none;
         z-index: 0;
       }
@@ -1361,7 +1401,7 @@ const rules = [
       }
 
       .section-alt {
-        background: var(--bg-alt);
+        background: rgba(19, 29, 51, 0.72);
       }
 
       /* Numerals in the same monospace the tool prints them in, aligned so a
