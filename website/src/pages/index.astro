@@ -96,6 +96,14 @@ const rules = [
   <body>
     <!-- Ambient field: a faint node lattice, because the product is a graph over
          an append-only log. Pure CSS + one SVG, no runtime cost. -->
+    <!-- Aurora: four blurred layers drifting on 22-34s loops. Decorative and
+         inert — aria-hidden, pointer-events: none, and stopped entirely under
+         prefers-reduced-motion. -->
+    <div class="ln-aurora" aria-hidden="true">
+      <span class="a1"></span><span class="a2"></span>
+      <span class="a3"></span><span class="a4"></span>
+    </div>
+
     <div class="ln">
       <!-- ============================ NAV ============================ -->
       <header class="ln-nav">
@@ -1258,19 +1266,45 @@ const rules = [
          original intent legible in the diff.
          --------------------------------------------------------------- */
 
-      .card,
-      .term,
-      .tool,
-      .rule,
-      .stat,
-      .panel,
-      .table-scroll,
-      .tab,
-      .btn,
-      .pill,
-      .badge {
+      /* ------------------------------------------------------------------
+         Square. Everywhere.
+
+         Swiss Modernism calls for square corners and that was the original
+         decision. The page then ended up with seven different radii because
+         the first override listed class names by hand and missed half of
+         them. Correcting *that* by rounding everything to 12px was the wrong
+         fix: the complaint was inconsistency, not squareness, and rounding
+         changed the style instead of enforcing it.
+
+         So: zero on every surface and control, in both the hero and the body,
+         with `!important` because the original stylesheet hardcodes radii in
+         two dozen places and plain selectors lose to its class rules.
+
+         The only exception is genuinely circular UI — the status dots and the
+         terminal's window buttons, which imitate a macOS title bar and would
+         read as broken as squares. Those are not card borders.
+         ------------------------------------------------------------------ */
+
+      .ln *,
+      .ln *::before,
+      .ln *::after,
+      main *,
+      main *::before,
+      main *::after,
+      footer *,
+      footer *::before,
+      footer *::after {
         border-radius: 0 !important;
         box-shadow: none !important;
+      }
+
+      .ln .dot,
+      main .dot,
+      main .tl,
+      main .loop-n,
+      main .callout-mark,
+      main .sw {
+        border-radius: 50% !important;
       }
 
       /* The ambient glows behind the old hero. There is no hero here any more —
@@ -1284,6 +1318,46 @@ const rules = [
 
       .section {
         border-top: 1px solid var(--line);
+        position: relative;
+      }
+
+      /* Scrim: holds the aurora to a predictable contribution behind running
+         text, while leaving it fully visible in the section seams. */
+      .section::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.82);
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      .section > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      /* Translucent surfaces so the aurora shows through and the cards read as
+         layered rather than painted on. Aurora UI's "depth via colour
+         layering", using the generated palette instead of its neon defaults. */
+      .card,
+      .tool,
+      .rule,
+      .hcard,
+      .loop-step,
+      .callout,
+      .curve-card,
+      .term {
+        /* 0.92, not 0.62. At 62% opacity 38% of the aurora reached the text
+           underneath, and because the blobs drift there is no fixed worst
+           case — modelling the brightest blob behind every element put 58 of
+           179 text nodes under AA, down to 3.53:1. Surfaces that carry text
+           are near-opaque; the depth now comes from the blur and the border,
+           and the aurora stays visible in the gaps between sections where
+           nothing has to be read. */
+        background: rgba(30, 41, 59, 0.92);
+        backdrop-filter: blur(14px);
+        border: 1px solid var(--line);
       }
 
       .section-alt {

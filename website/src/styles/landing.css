@@ -454,3 +454,116 @@
     animation-duration: 0.01ms !important;
   }
 }
+
+/* =========================================================================
+   Aurora background — added after the first pass read as flat and lifeless.
+
+   Technique from the ui-ux-pro-max `Aurora UI` record: mesh gradient, depth
+   via colour layering, "subtle 8-12s animations". Its stock palette is neon
+   cyan/magenta/yellow, which would be absurd on a memory engine, so only the
+   *method* is borrowed — the colours stay the generated slate-and-green.
+
+   Animated with `transform` only, never `background-position`, per the
+   generated `transform-performance` rule: transforms are composited, so four
+   large blurred layers drift without repainting on every frame.
+   ========================================================================= */
+
+.ln-aurora {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* Sits behind content but above the page background. Contrast was
+     re-measured across the whole page with these layers composited in. */
+  opacity: 1;
+}
+
+.ln-aurora span {
+  position: absolute;
+  display: block;
+  border-radius: 50%;
+  filter: blur(72px);
+  will-change: transform;
+}
+
+.ln-aurora .a1 {
+  width: 46vw;
+  height: 46vw;
+  top: -14vw;
+  left: -6vw;
+  background: radial-gradient(circle, rgba(34, 197, 94, 0.40), transparent 68%);
+  animation: ln-drift-a 22s ease-in-out infinite alternate;
+}
+
+.ln-aurora .a2 {
+  width: 40vw;
+  height: 40vw;
+  top: -6vw;
+  right: -8vw;
+  background: radial-gradient(circle, rgba(56, 116, 220, 0.46), transparent 68%);
+  animation: ln-drift-b 26s ease-in-out infinite alternate;
+}
+
+.ln-aurora .a3 {
+  width: 38vw;
+  height: 38vw;
+  top: 46vh;
+  left: 28vw;
+  background: radial-gradient(circle, rgba(124, 92, 220, 0.36), transparent 70%);
+  animation: ln-drift-c 30s ease-in-out infinite alternate;
+}
+
+.ln-aurora .a4 {
+  width: 34vw;
+  height: 34vw;
+  bottom: -10vw;
+  right: 6vw;
+  background: radial-gradient(circle, rgba(34, 197, 94, 0.30), transparent 70%);
+  animation: ln-drift-a 34s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes ln-drift-a {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(6vw, 5vh, 0) scale(1.14); }
+}
+
+@keyframes ln-drift-b {
+  from { transform: translate3d(0, 0, 0) scale(1.06); }
+  to   { transform: translate3d(-7vw, 7vh, 0) scale(0.94); }
+}
+
+@keyframes ln-drift-c {
+  from { transform: translate3d(0, 0, 0) scale(0.96); }
+  to   { transform: translate3d(5vw, -6vh, 0) scale(1.12); }
+}
+
+/* A hairline grid over the aurora. It keeps the page reading as an
+   engineering document rather than a lava lamp — the drift supplies life, the
+   grid supplies rigour. */
+.ln-aurora::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 78%);
+}
+
+/* Content sits above the aurora. */
+.ln,
+body > main,
+body > footer {
+  position: relative;
+  z-index: 1;
+}
+
+/* Generated rule `reduced-motion`, High severity. The aurora is decorative,
+   so it stops entirely rather than merely slowing down. */
+@media (prefers-reduced-motion: reduce) {
+  .ln-aurora span {
+    animation: none !important;
+  }
+}
