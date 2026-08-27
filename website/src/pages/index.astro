@@ -17,6 +17,7 @@
  * worth more than another headline multiple.
  */
 import { CodeGraph } from "../components/motion/CodeGraph";
+import { FeatureMatrix } from "../components/motion/FeatureMatrix";
 import { MemoryTimeline } from "../components/motion/MemoryTimeline";
 import { LedgerPanel } from "../components/motion/LedgerPanel";
 import { StatFigures } from "../components/motion/StatFigures";
@@ -337,6 +338,13 @@ const rules = [
           </div>
         </div>
       </section>
+
+      <!-- ======================= FEATURE MATRIX ======================
+           The engine panels place each product; this compares them. Every
+           dimension that separates these systems, scored per system, with the
+           six rows a competitor leads kept in and marked in the same green as
+           our own. -->
+      <FeatureMatrix client:load />
 
       <!-- ========================= PROOF STRIP =======================
            Real measurements only, each with the condition it was taken
