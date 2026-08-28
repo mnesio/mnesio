@@ -62,6 +62,10 @@ export default defineConfig({
       description:
         "A self-improving long-term memory layer for AI agents — append-only, bi-temporal, erasable, and verifiably better over time.",
       logo: { src: "./src/assets/logo.svg", alt: "mnesio" },
+      // Starlight defaults to `/favicon.svg` and the file did not exist, so
+      // every documentation tab was requesting a 404 and showing the browser's
+      // blank page icon. Points at the real mark now.
+      favicon: "/favicon.svg",
       customCss: ["./src/styles/custom.css"],
       components: {
         // Org footer (copyright, license, link columns) on every page.
