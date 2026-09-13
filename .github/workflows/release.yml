@@ -37,8 +37,27 @@ jobs:
       fail-fast: false # one broken platform must not withhold the other four
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          # Both macOS labels are pinned to 15, and both were changed after
+          # v0.1.3 shipped with **no Intel Mac binary at all**.
+          #
+          # The job did not fail. It was *cancelled*, 24 hours after it was
+          # queued, with an empty `runner_name` and this annotation:
+          #
+          #   The job has exceeded the maximum execution time while awaiting
+          #   a runner for 24h0m0s
+          #
+          # `macos-13` had been retired, so the label matched no runner and the
+          # job simply waited until GitHub gave up. Nothing in this workflow
+          # noticed, because no job depends on `binaries` — see the `verify`
+          # job below, which now does.
+          #
+          # `macos-14` is carrying a deprecation badge as of this change and is
+          # on the same path, so it moves now rather than during the release
+          # that it breaks. `timeout-minutes` is deliberately *not* the fix
+          # here: it bounds execution, not the queue wait that actually
+          # elapsed.
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
           # 24.04, reluctantly. 22.04 was chosen first so the glibc floor stayed
           # at 2.35 and the binary would start on Debian 12 — the right call in
           # principle, and it produced **no Linux binary at all** for v0.1.1.
@@ -134,6 +153,66 @@ jobs:
             ${{ steps.pkg.outputs.asset }}
             ${{ steps.pkg.outputs.asset }}.sha256
           fail_on_unmatched_files: true
+
+  # ----- Did the release actually get every platform? -----
+  #
+  # v0.1.3 shipped four of five binaries and nobody found out for three weeks,
+  # because every job in this workflow is independent: a cancelled matrix leg
+  # withheld its asset and no other job cared. `fail-fast: false` is right — one
+  # broken platform must not withhold the other four — but "publish what built"
+  # needs a counterpart that says *what did not*.
+  #
+  # So this asserts the finished release against the matrix, and it runs with
+  # `always()` precisely so that a failed or cancelled leg still gets reported
+  # rather than silently skipping this check along with itself.
+  verify:
+    name: every platform shipped
+    needs: binaries
+    if: always() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Compare published assets against the matrix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Keep this list in step with the build matrix above.
+          targets="
+          aarch64-apple-darwin
+          x86_64-apple-darwin
+          x86_64-unknown-linux-gnu
+          aarch64-unknown-linux-gnu
+          x86_64-pc-windows-msvc
+          "
+
+          have="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+                    --json assets --jq '.assets[].name')"
+          echo "Published assets:"; echo "$have" | sed 's/^/  /'
+
+          missing=0
+          for t in $targets; do
+            case "$t" in
+              *windows*) asset="mnesio-$TAG-$t.zip" ;;
+              *)         asset="mnesio-$TAG-$t.tar.gz" ;;
+            esac
+            for f in "$asset" "$asset.sha256"; do
+              if ! grep -qxF "$f" <<< "$have"; then
+                echo "::error title=Missing release asset::$f was never published"
+                missing=$((missing + 1))
+              fi
+            done
+          done
+
+          if [ "$missing" -gt 0 ]; then
+            echo "$missing expected asset(s) missing from $TAG." >&2
+            echo "The release is incomplete — do not announce it as shipped." >&2
+            exit 1
+          fi
+          echo "All five platforms published, with checksums."
 
   # ----- Container image → GitHub Container Registry (no external secrets) -----
   docker:
