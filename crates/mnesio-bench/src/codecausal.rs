@@ -205,6 +205,50 @@ pub fn format_contribution(c: &CodeContribution) -> String {
         100.0 * c.harmful as f32 / r.candidates_scored.max(1) as f32,
     );
 
+    // ----- how *scoped* is the credit? -----
+    //
+    // Aggregate contribution says a symbol helped; it cannot say on which
+    // tasks, and a promotion rule that is not scoped to a query class is a
+    // global boost — the thing `CODE_BOOST` already does better. So before
+    // promotion is worth building, this has to show that the credit actually
+    // concentrates. Printed here rather than inferred later, per discipline
+    // rule 7: size the bucket before building the fix.
+    if let Some(by_task) = r.decisive_by_task() {
+        let tasks = r.task_count.unwrap_or(0);
+        let covered = by_task.len();
+        let mut widths: Vec<usize> = r
+            .scored
+            .iter()
+            .filter(|c| !c.decisive_for.is_empty())
+            .map(|c| c.decisive_for.len())
+            .collect();
+        widths.sort_unstable();
+        let single = widths.iter().filter(|w| **w == 1).count();
+        let median = widths.get(widths.len() / 2).copied().unwrap_or(0);
+        let per_task: Vec<usize> = by_task.values().map(|v| v.len()).collect();
+        let crowded = per_task.iter().filter(|n| **n > 3).count();
+        out.push_str(&format!(
+            "## Is the credit scoped enough to promote?\n\n| question | answer |\n|---|---|\n| tasks with any decisive symbol | {covered} of {tasks} ({:.0}%) |\n| decisive symbols | {} |\n| decisive for exactly one task | {single} ({:.0}%) |\n| median tasks per decisive symbol | {median} |\n| tasks with >3 decisive symbols | {crowded} |\n\n",
+            100.0 * covered as f32 / tasks.max(1) as f32,
+            widths.len(),
+            100.0 * single as f32 / widths.len().max(1) as f32,
+        ));
+        if covered == 0 {
+            out.push_str(
+                "**No task has a decisive symbol**, so promotion has no target \
+                 either — the same wall suppression hit, from the other side. \
+                 Redundant context means no single symbol is what carried a \
+                 task.\n\n",
+            );
+        }
+    } else {
+        out.push_str(
+            "Per-task resolution was unavailable this pass, so scoping cannot \
+             be assessed — this is *not* the same as finding no scoped \
+             credit.\n\n",
+        );
+    }
+
     let mut top = r.ranked();
     top.truncate(10);
     if top.iter().any(|m| m.contribution.abs() > cfgeps(r)) {
