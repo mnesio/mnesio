@@ -71,14 +71,44 @@ impl<'a, I: CurveIndex> CodeCounterfactual<'a, I> {
 #[async_trait]
 impl<I: CurveIndex + Sync> CounterfactualEvaluator for CodeCounterfactual<'_, I> {
     async fn evaluate(&self, masked: &HashSet<MemoryRef>) -> Result<f32, MnesioError> {
-        if self.tasks.is_empty() {
+        let per = self.hits_per_task(masked).await?;
+        if per.is_empty() {
             return Ok(0.0);
         }
+        Ok(per.iter().sum::<f32>() / per.len() as f32)
+    }
+
+    /// Recall is a mean over per-task hits, so the per-task vector is what this
+    /// evaluator computes natively — the aggregate is the lossy view, not the
+    /// other way round.
+    ///
+    /// This is the whole reason the wedge was stuck. `harmful` is 0 under both
+    /// ablation modes because "did the context contain a gold symbol" can
+    /// essentially never be *improved* by removing a symbol, so suppression has
+    /// no target. The remaining lever is promotion from the load-bearing
+    /// symbols, and a promotion rule has to be scoped to the query class it
+    /// helped — which needs to know *which tasks* those were. The aggregate had
+    /// that information one line before it divided it away.
+    async fn evaluate_per_task(
+        &self,
+        masked: &HashSet<MemoryRef>,
+    ) -> Result<Option<Vec<f32>>, MnesioError> {
+        if self.tasks.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.hits_per_task(masked).await?))
+    }
+}
+
+impl<I: CurveIndex + Sync> CodeCounterfactual<'_, I> {
+    /// One score per task, in `self.tasks` order — which is a `Vec` and is never
+    /// reordered, satisfying the evaluator's stable-order contract.
+    async fn hits_per_task(&self, masked: &HashSet<MemoryRef>) -> Result<Vec<f32>, MnesioError> {
         let policy = Policy {
             suppressed: masked.clone(),
             boosts: Vec::new(),
         };
-        let mut hits = 0usize;
+        let mut per = Vec::with_capacity(self.tasks.len());
         for q in &self.tasks {
             // A retrieval failure here is a real failure, not a zero score.
             // Swallowing it as 0.0 would silently turn an outage into "every
@@ -89,11 +119,9 @@ impl<I: CurveIndex + Sync> CounterfactualEvaluator for CodeCounterfactual<'_, I>
                 .run(q, &policy)
                 .await
                 .map_err(MnesioError::Other)?;
-            if scored.hit {
-                hits += 1;
-            }
+            per.push(if scored.hit { 1.0 } else { 0.0 });
         }
-        Ok(hits as f32 / self.tasks.len() as f32)
+        Ok(per)
     }
 }
 

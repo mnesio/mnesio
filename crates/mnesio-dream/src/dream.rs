@@ -302,6 +302,8 @@ mod tests {
             scored: vec![],
             candidates_considered: 0,
             candidates_scored: 0,
+            per_task_resolved: false,
+            task_count: None,
         };
         let plan = DreamPass::new(cfg).plan(&empty, &[drifted.clone(), fresh]);
         assert_eq!(plan.reanchor.len(), 1, "only the drifted note re-anchors");
