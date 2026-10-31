@@ -5,7 +5,6 @@
 mnesio-data/
 /mneme-data
 **/*.rs.bk
-Cargo.lock
 .DS_Store
 # Runtime cache the fastembed crate downloads on first run (~100MB).
 .fastembed_cache/

@@ -86,6 +86,65 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # ----- Intel macOS has to build ONNX Runtime itself -----
+      #
+      # v0.1.4's first rehearsal failed here with:
+      #
+      #   ort-sys@2.0.0-rc.13: no prebuilt binaries available for target
+      #   x86_64-apple-darwin
+      #
+      # This is not a gap in `ort`. Its `dist.txt` ships ONNX Runtime 1.24.2 for
+      # eleven targets — every one we build plus iOS and Android — and Intel
+      # macOS is the single omission. Microsoft's own releases agree: across the
+      # last ~120 of them there is not one `osx-x86_64` asset, only `osx-arm64`.
+      # So there is no prebuilt to download from anywhere, and the only way to
+      # ship an Intel Mac binary is to compile the runtime.
+      #
+      # 1.24.2 is not a guess — it is the exact version in `ort-sys`'s manifest
+      # for every other target, and a mismatch would surface as a link error or,
+      # worse, an ABI mismatch at runtime. It stays correct only because
+      # `Cargo.lock` is now committed and the build below uses `--locked`: before
+      # that, CI resolved dependencies fresh and silently moved from ort-sys
+      # rc.12 to rc.13 between two builds. If ort-sys is ever bumped, this
+      # version must move with it.
+      #
+      # `ORT_LIB_LOCATION` is checked by ort-sys's build script *before* the
+      # download path, so pointing it at a local build needs no feature changes.
+      # It points at the build root rather than the `Release` directory so that
+      # ort-sys's own profile detection locates the `_deps` tree.
+      - name: Cache the ONNX Runtime build
+        if: matrix.target == 'x86_64-apple-darwin'
+        id: ort-cache
+        uses: actions/cache@v4
+        with:
+          path: onnxruntime/build/MacOS
+          key: ort-1.24.2-${{ matrix.target }}
+
+      - name: Build ONNX Runtime from source (Intel macOS only)
+        if: matrix.target == 'x86_64-apple-darwin' && steps.ort-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v1.24.2 --recursive \
+            https://github.com/microsoft/onnxruntime.git onnxruntime
+          cd onnxruntime
+          # A static build is what ort-sys links: it looks for the per-component
+          # `libonnxruntime_*.a` set, which `--build_shared_lib` would replace
+          # with a single dylib. Tests are the bulk of the build and prove
+          # nothing about our binary, so they are skipped.
+          ./build.sh \
+            --config Release \
+            --parallel \
+            --skip_tests \
+            --skip_submodule_sync \
+            --compile_no_warning_as_error \
+            --osx_arch x86_64
+
+      - name: Point ort-sys at the local ONNX Runtime
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: echo "ORT_LIB_LOCATION=$PWD/onnxruntime/build/MacOS" >> "$GITHUB_ENV"
+
       - name: Build
         env:
           # ONNX Runtime, pulled in by `fastembed`, is C++. Rust links the C
@@ -97,9 +156,9 @@ jobs:
           # reason.
           RUSTFLAGS: ${{ contains(matrix.target, 'linux') && '-C link-arg=-lstdc++' || '' }}
         run: |
-          cargo build --release --target ${{ matrix.target }} \
+          cargo build --release --locked --target ${{ matrix.target }} \
             -p mnesio-code --bin mnesio-code --features tree-sitter
-          cargo build --release --target ${{ matrix.target }} \
+          cargo build --release --locked --target ${{ matrix.target }} \
             -p mnesio-mcp --bin mnesio-mcp
         shell: bash
 
