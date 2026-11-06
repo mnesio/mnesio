@@ -189,3 +189,84 @@ The next thing to try is **promotion from load-bearing symbols**, which now has
 to a query class — a global boost would inject the symbol into every query — and
 `ContributionReport` currently exposes only the aggregate. That is the specific
 missing piece, stated so the next attempt does not start by rediscovering it.
+
+---
+
+## Per-task contribution shipped, and the curve measured on three repos
+
+Date: 2026-11-06. The missing piece named above — per-task contribution — is
+now built. `CounterfactualEvaluator::evaluate_per_task` returns one score per
+task, and `MemoryContribution::decisive_for` names the tasks whose score fell
+when that symbol was masked. `codecausal.rs` already had the per-task hit
+vector; it divided it away one line later.
+
+### The scoping question, answered — and it generalises
+
+Does causal credit concentrate tightly enough to *scope* a promotion rule? A
+rule that is not scoped is a global boost, which `CODE_BOOST` already does
+better. Measured on three repositories, two languages, 120 train tasks each:
+
+| repo | lang | tasks with a decisive symbol | decisive symbols | decisive for exactly one task |
+|---|---|---|---|---|
+| ripgrep | Rust | 21 of 120 (18%) | 9 of 849 (1%) | 7 (**78%**) |
+| httpx | Python | 16 of 120 (13%) | 15 | 14 (**93%**) |
+| click | Python | 12 of 120 (10%) | 11 of 700 (2%) | 10 (**91%**) |
+
+**Credit concentrates very tightly and covers very little.** 78–93% of decisive
+symbols map to exactly one task, so a rule *can* be scoped precisely. But only
+10–18% of tasks have any decisive symbol at all, and 1–2% of symbols are
+decisive. That is the honest ceiling on promotion, and it is far below the
+"30% rankable" share that motivated this line of work: rankable means a better
+*ordering* exists, not that one symbol is what carries the task.
+
+### The curve: +5.0pp, 0.0pp, −2.5pp
+
+Each repo n=6, every run a cold process with a private `MNESIO_CACHE_DIR`:
+
+| repo | proposals | committed | refused | held-out before → after | delta |
+|---|---|---|---|---|---|
+| ripgrep | 5 | 5 | 0 | 42% → 48% | **+5.0pp** |
+| httpx | 1 | 1 | 0 | 45% → 45% | **0.0pp** |
+| click | 2 | 2 | 0 | 45% → 42% | **−2.5pp** |
+
+Median **0.0pp**. **The ripgrep result does not generalise**, and reporting it
+alone would have been the single-corpus mistake this file already documents
+twice. All three deltas are stable at n=6; click's *baseline* varies across
+runs (45–50%) while its delta is exactly −2.5pp — one held-out task of 40 —
+every time.
+
+### Two findings about the gate, which matter more than the curve
+
+**1. Canaries do not predict held-out.** Every click rule passed the gate —
+canaries held at 48% — and held-out fell anyway. The gate is doing what it was
+specified to do; the canary set simply is not representative of held-out tasks
+on this suite. So the positioning claim needs narrowing, and the narrow version
+is still true and still unique:
+
+> mnesio can prove a committed rule did not regress **its canary suite**.
+
+It cannot, on this evidence, prove the rule did not regress held-out
+performance. Those are different claims and only the first is earned. The
+website and README must not blur them.
+
+**2. The gate refused nothing: 8 proposals, 8 committed, 0 refused.** The
+refusal path is real — a test pins a canary-breaking suppression being rejected
+despite causal evidence — but across three repositories no *naturally occurring*
+proposal ever tripped it. A gate that has never refused live traffic is an
+untested gate in practice, whatever its unit tests say.
+
+### Where that leaves the wedge
+
+- Per-task contribution: **built, tested, and it generalises** as a scoping
+  signal (78–93% single-task across three repos).
+- A positive learning curve: **still not met.** One repo in three improved.
+- `causal_curve` still consumes `(memory, contribution)` and does **not** read
+  `decisive_for`, so the +5.0pp on ripgrep came from the pre-existing
+  suppression path, not from this change. No credit is claimed for it here.
+
+The next step is to wire `decisive_for` into `causal_curve` so promotion rules
+are scoped to the query classes a symbol actually carried. The sizing above
+says what to expect before starting: a ceiling of 10–18% of tasks. If that is
+not worth the complexity, the honest alternative is to stop calling the curve
+the headline and lead with what is measured and unique — gated commits, and
+the provenance to show why each rule exists.
