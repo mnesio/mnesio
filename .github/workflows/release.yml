@@ -112,10 +112,16 @@ jobs:
       # download path, so pointing it at a local build needs no feature changes.
       # It points at the build root rather than the `Release` directory so that
       # ort-sys's own profile detection locates the `_deps` tree.
-      - name: Cache the ONNX Runtime build
+      # restore/save split rather than `actions/cache`, because its save runs
+      # as a post step and post steps are skipped when the job fails. The first
+      # attempt at this built ONNX Runtime for 63 minutes, failed at the cargo
+      # link step afterwards, and threw the whole hour away. The runtime is an
+      # expensive artifact that does not depend on our code compiling, so it is
+      # saved as soon as it exists.
+      - name: Restore the ONNX Runtime build
         if: matrix.target == 'x86_64-apple-darwin'
         id: ort-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: onnxruntime/build/MacOS
           key: ort-1.24.2-${{ matrix.target }}
@@ -140,10 +146,37 @@ jobs:
             --compile_no_warning_as_error \
             --osx_arch x86_64
 
+      - name: Save the ONNX Runtime build
+        if: matrix.target == 'x86_64-apple-darwin' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: onnxruntime/build/MacOS
+          key: ort-1.24.2-${{ matrix.target }}
+
+      # `Release`, not the build root. ort-sys tries its static layouts in
+      # order, and the first one expects `_deps` as a *sibling* of the profile
+      # directory (`<base>/_deps/onnx-build/Release`). ONNX Runtime's cmake puts
+      # it *inside* it (`<base>/Release/_deps/onnx-build`). Pointing at the root
+      # matched that first layout on its `libonnxruntime_common.a` probe — which
+      # is the only library it checks before committing — so it emitted
+      # `-l static=onnx` against a search path that did not exist and never fell
+      # through to the layout that fits:
+      #
+      #   error: could not find native static library `onnx`,
+      #   perhaps an -L flag is missing?
+      #
+      # Naming `Release` directly leaves ort-sys's profile detection empty, so
+      # its first layout resolves to `<base>/_deps/onnx-build` and matches what
+      # cmake actually produced.
       - name: Point ort-sys at the local ONNX Runtime
         if: matrix.target == 'x86_64-apple-darwin'
         shell: bash
-        run: echo "ORT_LIB_LOCATION=$PWD/onnxruntime/build/MacOS" >> "$GITHUB_ENV"
+        run: |
+          dir="$PWD/onnxruntime/build/MacOS/Release"
+          # Fail here, naming the cause, rather than 60 lines into a link error.
+          test -f "$dir/libonnxruntime_common.a" \
+            || { echo "::error::no ONNX Runtime static libs in $dir"; ls -la "$dir" || true; exit 1; }
+          echo "ORT_LIB_LOCATION=$dir" >> "$GITHUB_ENV"
 
       - name: Build
         env:
